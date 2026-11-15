@@ -1,0 +1,5 @@
+row_id,tenant_id,amount
+ord_t_0001,tenant_demo_001,10.00
+ord_t_0002,tenant_demo_002,20.00
+ord_t_0003,tenant_demo_003,30.00
+ord_t_0004,tenant_demo_004,40.00

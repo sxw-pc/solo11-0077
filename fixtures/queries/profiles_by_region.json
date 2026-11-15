@@ -1,0 +1,15 @@
+{
+  "description": "Region membership resolves through the list map.",
+  "filters": [
+    {
+      "field": "region",
+      "op": "in",
+      "value": [
+        "region_alpha",
+        "region_gamma"
+      ]
+    }
+  ],
+  "name": "profiles_by_region",
+  "table": "profiles"
+}

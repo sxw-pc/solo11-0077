@@ -1,0 +1,2 @@
+row_id,tenant_id,amount,channel,note
+ord_demo_0072,tenant_demo_006,467.55,partner_demo,synthetic order fixture

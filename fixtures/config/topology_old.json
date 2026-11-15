@@ -1,0 +1,91 @@
+{
+  "description": "Synthetic demo topology (old); not connected to any datastore.",
+  "generated_at": "2026-01-02T03:04:05Z",
+  "shards": [
+    "shard_00",
+    "shard_01",
+    "shard_02",
+    "shard_03",
+    "shard_10",
+    "shard_11",
+    "shard_12",
+    "shard_13",
+    "shard_20",
+    "shard_21",
+    "shard_22",
+    "shard_23"
+  ],
+  "tables": [
+    {
+      "bucket_map": [
+        "shard_00",
+        "shard_00",
+        "shard_00",
+        "shard_00",
+        "shard_01",
+        "shard_01",
+        "shard_01",
+        "shard_01",
+        "shard_02",
+        "shard_02",
+        "shard_02",
+        "shard_02",
+        "shard_03",
+        "shard_03",
+        "shard_03",
+        "shard_03"
+      ],
+      "buckets": 16,
+      "case_sensitive": true,
+      "default_shard": "shard_00",
+      "key": "tenant_id",
+      "null_policy": "route_default",
+      "router": "hash",
+      "table": "orders"
+    },
+    {
+      "case_sensitive": true,
+      "default_shard": null,
+      "key": "event_day",
+      "null_policy": "error",
+      "ranges": [
+        {
+          "lower": "2024-01-01",
+          "shard": "shard_10",
+          "upper": "2024-04-01"
+        },
+        {
+          "lower": "2024-04-01",
+          "shard": "shard_11",
+          "upper": "2024-07-01"
+        },
+        {
+          "lower": "2024-07-01",
+          "shard": "shard_12",
+          "upper": "2024-10-01"
+        },
+        {
+          "lower": "2024-10-01",
+          "shard": "shard_13",
+          "upper": null
+        }
+      ],
+      "router": "range",
+      "table": "events"
+    },
+    {
+      "case_sensitive": true,
+      "default_shard": "shard_23",
+      "key": "region",
+      "list_map": {
+        "region_alpha": "shard_20",
+        "region_beta": "shard_21",
+        "region_gamma": "shard_22"
+      },
+      "null_policy": "route_default",
+      "router": "list",
+      "table": "profiles"
+    }
+  ],
+  "version": 1
+}

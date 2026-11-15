@@ -1,0 +1,2 @@
+row_id,event_day,actor_id,kind,note
+evt_demo_0023,2024-05-04,actor_demo_035,view_demo,synthetic event fixture

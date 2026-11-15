@@ -1,0 +1,12 @@
+{
+  "description": "Exact tenant lookup should touch only the routed shard.",
+  "filters": [
+    {
+      "field": "tenant_id",
+      "op": "eq",
+      "value": "tenant_demo_007"
+    }
+  ],
+  "name": "orders_by_tenant",
+  "table": "orders"
+}

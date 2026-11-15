@@ -1,0 +1,56 @@
+{
+  "description": "Synthetic unit-test topology.",
+  "generated_at": "2026-01-02T00:00:00Z",
+  "shards": [
+    "shard_a",
+    "shard_b",
+    "shard_c"
+  ],
+  "tables": [
+    {
+      "bucket_map": [
+        "shard_a",
+        "shard_a",
+        "shard_b",
+        "shard_b"
+      ],
+      "buckets": 4,
+      "case_sensitive": true,
+      "default_shard": "shard_a",
+      "key": "tenant_id",
+      "null_policy": "route_default",
+      "router": "hash",
+      "table": "orders"
+    },
+    {
+      "key": "event_day",
+      "null_policy": "error",
+      "ranges": [
+        {
+          "lower": "2024-01-01",
+          "shard": "shard_b",
+          "upper": "2024-07-01"
+        },
+        {
+          "lower": "2024-07-01",
+          "shard": "shard_c",
+          "upper": null
+        }
+      ],
+      "router": "range",
+      "table": "events"
+    },
+    {
+      "default_shard": "shard_b",
+      "key": "region",
+      "list_map": {
+        "region_alpha": "shard_a",
+        "region_beta": "shard_c"
+      },
+      "null_policy": "route_default",
+      "router": "list",
+      "table": "profiles"
+    }
+  ],
+  "version": 1
+}

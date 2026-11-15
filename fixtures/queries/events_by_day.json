@@ -1,0 +1,17 @@
+{
+  "description": "A half-open day window may overlap more than one range shard.",
+  "filters": [
+    {
+      "field": "event_day",
+      "op": "gte",
+      "value": "2024-04-15"
+    },
+    {
+      "field": "event_day",
+      "op": "lt",
+      "value": "2024-07-15"
+    }
+  ],
+  "name": "events_by_day",
+  "table": "events"
+}

@@ -1,0 +1,14 @@
+{
+  "files": [
+    {
+      "name": "part-000.csv",
+      "rows": 32,
+      "sha256": "1be98704251ccd4b16d6201196f9dd07df9eba2cdf219dff30d258f9702b8474"
+    }
+  ],
+  "format_version": 1,
+  "generated_at": "2026-01-02T03:04:05Z",
+  "row_count": 32,
+  "shard": "shard_10",
+  "table": "events"
+}

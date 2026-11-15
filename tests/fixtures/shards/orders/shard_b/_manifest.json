@@ -1,0 +1,14 @@
+{
+  "files": [
+    {
+      "name": "part-000.csv",
+      "rows": 2,
+      "sha256": "dff799496317faeabd731227628eaae6c936c2f3c8f17d99b742a48de3eba088"
+    }
+  ],
+  "format_version": 1,
+  "generated_at": "2026-01-02T00:00:00Z",
+  "row_count": 2,
+  "shard": "shard_b",
+  "table": "orders"
+}

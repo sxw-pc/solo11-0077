@@ -1,0 +1,14 @@
+{
+  "files": [
+    {
+      "name": "part-000.csv",
+      "rows": 22,
+      "sha256": "2ba706d66d519cc151b9cf361b2cc705544d4bf1322e38f275fc01a7c77889a4"
+    }
+  ],
+  "format_version": 1,
+  "generated_at": "2026-01-02T03:04:05Z",
+  "row_count": 22,
+  "shard": "shard_21",
+  "table": "profiles"
+}

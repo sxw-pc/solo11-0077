@@ -1,0 +1,13 @@
+row_id,region,display_name,segment
+prf_demo_0002,region_omega,Sample Profile 002,segment_demo_b
+prf_demo_0004,region_omega,Sample Profile 004,segment_demo_a
+prf_demo_0009,region_omega,Sample Profile 009,segment_demo_a
+prf_demo_0011,region_omega,Sample Profile 011,segment_demo_b
+prf_demo_0019,region_omega,Sample Profile 019,segment_demo_b
+prf_demo_0028,region_omega,Sample Profile 028,segment_demo_b
+prf_demo_0050,region_omega,Sample Profile 050,segment_demo_a
+prf_demo_0052,region_omega,Sample Profile 052,segment_demo_a
+prf_demo_0057,region_omega,Sample Profile 057,segment_demo_a
+prf_demo_0065,region_omega,Sample Profile 065,segment_demo_a
+prf_demo_0067,region_omega,Sample Profile 067,segment_demo_a
+prf_demo_0068,region_omega,Sample Profile 068,segment_demo_a

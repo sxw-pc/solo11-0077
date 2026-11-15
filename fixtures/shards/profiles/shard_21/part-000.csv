@@ -1,0 +1,23 @@
+row_id,region,display_name,segment
+prf_demo_0008,region_beta,Sample Profile 008,segment_demo_a
+prf_demo_0010,region_beta,Sample Profile 010,segment_demo_a
+prf_demo_0012,region_beta,Sample Profile 012,segment_demo_b
+prf_demo_0013,region_beta,Sample Profile 013,segment_demo_a
+prf_demo_0015,region_beta,Sample Profile 015,segment_demo_b
+prf_demo_0016,region_beta,Sample Profile 016,segment_demo_a
+prf_demo_0017,region_beta,Sample Profile 017,segment_demo_b
+prf_demo_0021,region_beta,Sample Profile 021,segment_demo_b
+prf_demo_0022,region_beta,Sample Profile 022,segment_demo_b
+prf_demo_0030,region_beta,Sample Profile 030,segment_demo_a
+prf_demo_0034,region_beta,Sample Profile 034,segment_demo_a
+prf_demo_0039,region_beta,Sample Profile 039,segment_demo_a
+prf_demo_0045,region_beta,Sample Profile 045,segment_demo_b
+prf_demo_0047,region_beta,Sample Profile 047,segment_demo_b
+prf_demo_0048,region_beta,Sample Profile 048,segment_demo_a
+prf_demo_0056,region_beta,Sample Profile 056,segment_demo_b
+prf_demo_0061,region_beta,Sample Profile 061,segment_demo_a
+prf_demo_0064,region_beta,Sample Profile 064,segment_demo_a
+prf_demo_0072,region_beta,Sample Profile 072,segment_demo_a
+prf_demo_0077,region_beta,Sample Profile 077,segment_demo_a
+prf_demo_0078,region_beta,Sample Profile 078,segment_demo_a
+prf_demo_0080,region_beta,Sample Profile 080,segment_demo_b
