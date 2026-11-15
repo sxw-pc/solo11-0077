@@ -2,3 +2,12 @@ __pycache__/
 *.py[cod]
 .shardroute-demo/
 *.sqlite3
+.venv/
+venv/
+node_modules/
+*.pyc
+.pytest_cache/
+.coverage
+.benchmarks/
+.env
+dist/
