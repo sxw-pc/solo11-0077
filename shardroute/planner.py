@@ -136,6 +136,7 @@ def build_plan(
     table_totals: Counter[str] = Counter()
     table_moved: Counter[str] = Counter()
     route_errors = 0
+    route_error_details: list[dict[str, Any]] = []
     dropped = 0
     for table in sorted(old.tables):
         row_list = logical_rows.get(table, [])
@@ -146,8 +147,18 @@ def build_plan(
             try:
                 before = old_router.route_values(table, row.values)
                 after = new_router.route_values(table, row.values)
-            except ShardRouteError:
+            except ShardRouteError as exc:
                 route_errors += 1
+                route_error_details.append(
+                    {
+                        "table": table,
+                        "row_id": row.row_id,
+                        "code": exc.code,
+                        "location": exc.location,
+                        "message": exc.message,
+                        "details": exc.details,
+                    }
+                )
                 continue
             if before.dropped or after.dropped:
                 dropped += 1
@@ -176,7 +187,7 @@ def build_plan(
     blocked_tables = sorted(set(old.tables) - set(new.tables))
     blocked_rows = sum(table_totals[table] for table in blocked_tables)
     batches = _make_batches(cells)
-    return {
+    result = {
         "old_fingerprint": old.fingerprint,
         "new_fingerprint": new.fingerprint,
         "total_rows": total_rows,
@@ -198,3 +209,8 @@ def build_plan(
             "max_batch_rows": MAX_BATCH_ROWS,
         },
     }
+    if route_error_details:
+        # Only present when something actually failed to route, so plans over
+        # fully valid data keep their historical representation.
+        result["route_error_details"] = route_error_details
+    return result

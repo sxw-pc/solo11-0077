@@ -11,9 +11,13 @@ SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 @dataclass(frozen=True)
 class RangeRule:
-    lower: str
-    upper: str | None
+    lower: Any
+    upper: Any | None
     shard: str
+    # Parsed comparison keys for typed domains; ``None`` means "text" or
+    # "not yet parsed" and the textual bound is used directly.
+    lower_key: Any = None
+    upper_key: Any = None
 
 @dataclass(frozen=True)
 class TableTopology:
@@ -27,6 +31,8 @@ class TableTopology:
     ranges: tuple[RangeRule, ...] = ()
     list_map: dict[str, str] = field(default_factory=dict)
     case_sensitive: bool = True
+    range_domain: str = "text"
+    range_alias_policy: str = "strict"
     def table_shards(self) -> list[str]:
         """Every shard this table can route to, sorted for deterministic output."""
         targets: set[str] = set()
@@ -40,7 +46,7 @@ class TableTopology:
             targets.add(self.default_shard)
         return sorted(targets)
     def as_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "table": self.table,
             "router": self.router,
             "key": list(self.key_fields),
@@ -55,6 +61,12 @@ class TableTopology:
             "list_map": dict(sorted(self.list_map.items())),
             "case_sensitive": self.case_sensitive,
         }
+        # Emit the typed-range fields only when they are actually declared, so
+        # legacy text-domain topologies keep their exact report representation.
+        if self.range_domain != "text":
+            payload["range_domain"] = self.range_domain
+            payload["range_alias_policy"] = self.range_alias_policy
+        return payload
 
 @dataclass(frozen=True)
 class Topology:
@@ -82,12 +94,20 @@ class RouteTrace:
     digest_prefix: str | None = None
     comparisons: tuple[str, ...] = ()
     dropped: bool = False
+    range_domain: str | None = None
+    parsed_value: Any = None
+    range_alias_used: bool = False
     def as_dict(self) -> dict[str, Any]:
-        return {"table": self.table, "key_fields": list(self.key_fields), "raw_value": self.raw_value,
+        payload = {"table": self.table, "key_fields": list(self.key_fields), "raw_value": self.raw_value,
                 "normalized_value": self.normalized_value, "bucket": self.bucket,
                 "target_shard": self.target_shard, "rule": self.rule, "null_action": self.null_action,
                 "digest_prefix": self.digest_prefix, "comparisons": list(self.comparisons),
                 "dropped": self.dropped}
+        if self.range_domain is not None:
+            payload["range_domain"] = self.range_domain
+            payload["parsed_value"] = self.parsed_value
+            payload["range_alias_used"] = self.range_alias_used
+        return payload
 
 @dataclass(frozen=True)
 class LogicalRow:

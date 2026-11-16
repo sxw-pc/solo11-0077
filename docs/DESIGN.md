@@ -49,13 +49,16 @@ shard  = bucket_map[bucket]
 
 ### Range
 
-`router=range` 要求单键，日期或数值必须零填充，以便稳定字符串比较。
+`router=range` 要求单键，区间为左闭右开 `[lower, upper)`。
 
-- 区间为左闭右开 `[lower, upper)`。
+- 未声明 `range_domain` 时使用 `text`：边界按字符串字典序比较，日期或数值需要零填充。这是历史兼容路径。
+- 声明 `range_domain=integer` 或 `date` 时，配置界点、行键和查询值都经 `shardroute/range_domain.py` 的同一解析器转成精确比较键（整数或日历 ordinal），不使用字符串或浮点比较。
 - 最后一段 `upper` 可为 `null`，表示无上界；非最后一段必须有限。
-- 配置中的区间必须连续、无重叠、无缺口。
+- 配置中的区间必须连续、无重叠、无缺口；typed 域在解析值上检验。
+- 非规范但可解析的拼写（如 `02`）由 `range_alias_policy` 决定：`strict` 拒绝，`canonicalize` 归一为同一业务值。配置校验、路由、查询解释和计划共用该策略，避免阶段间不一致。
+- 解析失败抛出 `ROUTE_RANGE_VALUE`，保留原始键；不会静默退回字典序或浮点比较。
 - 未命中任何区间时：有默认分片则落默认分片（`rule=range_default`），否则 `ROUTE_NO_MATCH`。
-- trace 的 `comparisons` 记录查询值与边界的比较，以及是否回退默认分片。
+- trace 的 `comparisons` 记录解析后的比较；typed 表额外暴露 `range_domain`、`parsed_value` 与 `range_alias_used`。
 
 ### List
 
@@ -127,6 +130,7 @@ manifest 校验会识别：缺失 manifest、解析失败、身份不匹配、�
 
 - 对每条逻辑行分别计算旧拓扑目标与新拓扑目标。
 - 仅当两个目标不同且均未 drop 时，计入移动矩阵 `(table, from_shard, to_shard)`。
+- 任一行在两个拓扑中的任一解析/路由失败时计入 `route_errors`；此时计划额外输出 `route_error_details`，逐行保留 `code`、`location`、`raw_value` 等证据（无错误时不输出该字段，保持旧计划表示不变）。
 - 移动矩阵按 table/from/to 排序；批次按 cell 顺序每 80 行切分，批次号从 `batch-001` 开始。
 - 阻塞项来自：未修复的 critical/high 审计发现；目标拓扑缺表；分片键变更；路由错误。router 族变化标记为 review。
 - 回滚清单固定为 7 步，强调先冻结写入、快照 manifest/校验和、shadow copy、重新审计、双读验证、失败恢复旧拓扑、解冻并归档。
@@ -147,7 +151,7 @@ manifest 校验会识别：缺失 manifest、解析失败、身份不匹配、�
 | `full_scan` | 没有分片键谓词，必须扫描全部合法分片 |
 
 - hash：只有所有分片键组件都有等值谓词时才能裁剪；复合键缺组件则不可裁剪。
-- range：等值/In 直接路由；区间谓词按左闭右开区间与配置区间求交；完全覆盖所有分片时降级为 `full_scan`。
+- range：等值/In 直接路由；区间谓词按左闭右开区间与配置区间求交；完全覆盖所有分片时降级为 `full_scan`。typed 域（`integer`/`date`）在解析值上求交，解析失败的值不会被裁剪，而是 `not_prunable` 并记录 `range_value_errors`；若查询窗口越过所有有限区间（或首个区间下界），typed 表的 `default_shard` 会被保守加入目标集合，与 Router 的兜底一致。
 - list：等值/In 通过 `list_map` 映射；未映射值使用默认分片；存在默认分片时保守加入目标集合。
 - null 等值谓词遵循 null 策略；`error` 策略下标记 `not_prunable`。
 - 每个结果包含全部合法分片、目标分片、被裁剪分片、覆盖率、原因和结构化 trace。

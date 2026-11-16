@@ -71,12 +71,22 @@ def validation_report(path: str | Path) -> dict[str, Any]:
         "issue_count": 0,
         "issues": [],
         "tables": [
-            {
-                "table": table.table,
-                "router": table.router,
-                "key": list(table.key_fields),
-                "target_shards": table.table_shards(),
-            }
+            _table_summary(table)
             for table in (topology.tables[name] for name in topology.table_names())
         ],
     }
+
+
+def _table_summary(table) -> dict[str, Any]:
+    summary = {
+        "table": table.table,
+        "router": table.router,
+        "key": list(table.key_fields),
+        "target_shards": table.table_shards(),
+    }
+    # Keep legacy text-domain output identical to earlier versions while
+    # surfacing the effective typed policy when one is declared.
+    if table.range_domain != "text":
+        summary["range_domain"] = table.range_domain
+        summary["range_alias_policy"] = table.range_alias_policy
+    return summary

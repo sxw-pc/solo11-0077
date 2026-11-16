@@ -9,6 +9,12 @@ from typing import Any
 from .errors import QUERY_INVALID, QueryError, ShardRouteError
 from .models import QueryExplanation, QueryFilter, TableTopology, Topology
 from .query_support import OPS, RANGE_OPS, _key_filters, _normalized, _parse, _result
+from .range_domain import (
+    RangeValueError,
+    parse_range_value,
+    rule_lower_key,
+    rule_upper_key,
+)
 from .router import Router
 
 def _explain_hash(
@@ -113,12 +119,37 @@ def _explain_list(
         "list membership maps to a subset of shards", trace,
     )
 
-def _range_targets(table: TableTopology, lower: str | None, upper: str | None, upper_inclusive: bool) -> tuple[list[str], list[dict[str, Any]]]:
+def _range_targets(
+    table: TableTopology,
+    lower: Any,
+    upper: Any,
+    upper_inclusive: bool,
+    *,
+    typed: bool = False,
+    lower_inclusive: bool = True,
+) -> tuple[list[str], list[dict[str, Any]], bool]:
+    """Return (targets, rule explanations, default_needed).
+
+    ``default_needed`` is true when the query window reaches values outside
+    every configured interval.  Typed tables may legitimately route such
+    values to ``default_shard``; ignoring it would let a query prune a shard
+    that the Router would still send rows to.
+    """
     matched: list[str] = []
     explanations = []
+    keys: list[tuple[Any, Any]] = []
     for index, rule in enumerate(table.ranges):
-        rule_upper = _normalized(table, rule.upper) if rule.upper is not None else None
-        rule_lower = _normalized(table, rule.lower) or rule.lower
+        if typed:
+            rule_lower = rule_lower_key(rule, table.range_domain, table.range_alias_policy)
+            rule_upper = rule_upper_key(rule, table.range_domain, table.range_alias_policy)
+            rule_lower_display: Any = rule.lower
+            rule_upper_display: Any = rule.upper
+        else:
+            rule_upper = _normalized(table, rule.upper) if rule.upper is not None else None
+            rule_lower = _normalized(table, rule.lower) or rule.lower
+            rule_lower_display = rule_lower
+            rule_upper_display = rule_upper
+        keys.append((rule_lower, rule_upper))
         left_ok = rule_upper is None or lower is None or lower < rule_upper
         right_ok = (
             upper is None
@@ -127,16 +158,36 @@ def _range_targets(table: TableTopology, lower: str | None, upper: str | None, u
         )
         if left_ok and right_ok:
             matched.append(rule.shard)
-            explanations.append(
-                {
-                    "rule": f"range[{index}]",
-                    "shard": rule.shard,
-                    "lower": rule_lower,
-                    "upper": rule_upper,
-                    "matched": True,
-                }
-            )
-    return sorted(set(matched)), explanations
+            explanation: dict[str, Any] = {
+                "rule": f"range[{index}]",
+                "shard": rule.shard,
+                "lower": rule_lower_display,
+                "upper": rule_upper_display,
+                "matched": True,
+            }
+            if typed:
+                explanation.update(
+                    {
+                        "domain": table.range_domain,
+                        "parsed_lower": rule_lower,
+                        "parsed_upper": rule_upper,
+                    }
+                )
+            explanations.append(explanation)
+    default_needed = False
+    if typed and table.default_shard and keys:
+        first_lower = keys[0][0]
+        last_upper = keys[-1][1]
+        if lower is None or lower < first_lower:
+            default_needed = True
+        if last_upper is not None and (
+            upper is None
+            or upper > last_upper
+            or (upper == last_upper and upper_inclusive)
+        ):
+            default_needed = True
+    return sorted(set(matched)), explanations, default_needed
+
 
 def _explain_range(
     router: Router,
@@ -146,39 +197,110 @@ def _explain_range(
     filters: list[QueryFilter],
     key_filters: list[QueryFilter],
 ) -> QueryExplanation:
+    typed = table.range_domain != "text"
     trace: dict[str, Any] = {"router": "range", "predicates": []}
+    if typed:
+        trace["range_domain"] = table.range_domain
+        trace["range_alias_policy"] = table.range_alias_policy
     eq_values: list[Any] = []
-    lower: str | None = None
-    upper: str | None = None
+    lower: Any = None
+    upper: Any = None
+    lower_inclusive = True
     upper_inclusive = False
+    lower_raw: Any = None
+    upper_raw: Any = None
     interval_used = False
+    value_errors: list[dict[str, Any]] = []
     for item in key_filters:
         if item.op not in RANGE_OPS:
             continue
         if item.op in {"eq", "in", "is_null"}:
             values = item.value if item.op == "in" else [item.value]
-            for value in values:
-                eq_values.append(_normalized(table, value))
-            trace["predicates"].append({"op": item.op, "value": item.value, "mode": "point"})
+            for raw_value in values:
+                if typed and raw_value is not None:
+                    try:
+                        parsed = parse_range_value(
+                            raw_value, table.range_domain, table.range_alias_policy
+                        )
+                    except RangeValueError as exc:
+                        value_errors.append({"op": item.op, **exc.as_dict()})
+                        trace["predicates"].append(
+                            {"op": item.op, "value": raw_value, "mode": "point", "error": exc.as_dict()}
+                        )
+                        continue
+                    eq_values.append(raw_value)
+                    trace["predicates"].append(
+                        {"op": item.op, "value": raw_value, "parsed": parsed.evidence(),
+                         "canonical": parsed.canonical, "alias_used": parsed.alias_used,
+                         "mode": "point"}
+                    )
+                    continue
+                eq_values.append(_normalized(table, raw_value))
+                trace["predicates"].append({"op": item.op, "value": raw_value, "mode": "point"})
             continue
-        value = _normalized(table, item.value)
-        if value is None:
-            continue
+        if typed:
+            if item.value is None:
+                continue
+            try:
+                parsed = parse_range_value(
+                    item.value, table.range_domain, table.range_alias_policy
+                )
+            except RangeValueError as exc:
+                value_errors.append({"op": item.op, **exc.as_dict()})
+                trace["predicates"].append(
+                    {"op": item.op, "value": item.value, "mode": "bound", "error": exc.as_dict()}
+                )
+                continue
+            value = parsed.key
+            trace["predicates"].append(
+                {"op": item.op, "value": item.value, "parsed": parsed.evidence(),
+                 "canonical": parsed.canonical, "alias_used": parsed.alias_used,
+                 "mode": "bound"}
+            )
+        else:
+            value = _normalized(table, item.value)
+            if value is None:
+                continue
+            trace["predicates"].append({"op": item.op, "value": value, "mode": "bound"})
         interval_used = True
-        trace["predicates"].append({"op": item.op, "value": value, "mode": "bound"})
         if item.op in {"gte", "gt"}:
             if lower is None or value > lower or (value == lower and item.op == "gt"):
                 lower = value
+                lower_inclusive = item.op == "gte"
+                lower_raw = item.value
         if item.op in {"lte", "lt"}:
             if upper is None or value < upper or (value == upper and item.op == "lt"):
                 upper = value
                 upper_inclusive = item.op == "lte"
-    if lower is not None and upper is not None and lower > upper:
+                upper_raw = item.value
+    if value_errors:
+        trace["range_value_errors"] = value_errors
+        trace["reason"] = "range predicate value(s) could not be parsed under the declared domain"
+        return _result(
+            table, name, description, filters, set(), "", trace["reason"], trace,
+            force_not_prunable=True,
+        )
+    if typed:
+        empty = (
+            lower is not None
+            and upper is not None
+            and (
+                lower > upper
+                or (lower == upper and not (lower_inclusive and upper_inclusive))
+            )
+        )
+    else:
+        empty = (
+            lower is not None
+            and upper is not None
+            and (
+                lower > upper
+                or (lower == upper and not upper_inclusive)
+            )
+        )
+    if empty:
         trace["contradiction"] = True
         return _result(table, name, description, filters, set(), "pruned", "range predicates are contradictory", trace)
-    if lower is not None and upper is not None and lower == upper and not upper_inclusive:
-        trace["contradiction"] = True
-        return _result(table, name, description, filters, set(), "pruned", "range predicates match no value", trace)
     if eq_values:
         targets: set[str] = set()
         route_traces = []
@@ -196,6 +318,9 @@ def _explain_range(
                 route = router.route(table.table, value)
             except ShardRouteError as exc:
                 trace.setdefault("route_errors", []).append(exc.as_dict())
+                # ROUTE_NO_MATCH means the Router can place no rows for this
+                # key, so it contributes no shard.  Parse-level rejects were
+                # already handled above and force not_prunable.
                 continue
             if route.target_shard:
                 targets.add(route.target_shard)
@@ -215,24 +340,30 @@ def _explain_range(
             table, name, description, filters, set(), "full_scan" if not key_filters else "",
             reason, trace, force_not_prunable=bool(key_filters),
         )
-    targets, rule_explanations = _range_targets(table, lower, upper, upper_inclusive)
-    if not targets and table.default_shard:
-        targets = [table.default_shard]
-        trace["default_fallback"] = True
-    trace.update(
-        {
-            "interval": {
-                "lower": lower,
-                "upper": upper,
-                "upper_inclusive": upper_inclusive,
-                "lower_unbounded": lower is None,
-            },
-            "rules": rule_explanations,
-        }
+    targets, rule_explanations, default_needed = _range_targets(
+        table, lower, upper, upper_inclusive, typed=typed
     )
-    decision = "pruned" if targets else "pruned"
+    if table.default_shard and (default_needed or not targets):
+        targets = sorted(set(targets) | {table.default_shard})
+        trace["default_fallback"] = True
+    interval: dict[str, Any] = {
+        "lower": lower,
+        "upper": upper,
+        "upper_inclusive": upper_inclusive,
+        "lower_unbounded": lower is None,
+    }
+    if typed:
+        interval.update(
+            {
+                "domain": table.range_domain,
+                "lower_raw": lower_raw,
+                "upper_raw": upper_raw,
+                "lower_inclusive": lower_inclusive,
+            }
+        )
+    trace.update({"interval": interval, "rules": rule_explanations})
     reason = "range interval overlaps a subset of shard intervals"
-    return _result(table, name, description, filters, set(targets), decision, reason, trace)
+    return _result(table, name, description, filters, set(targets), "pruned", reason, trace)
 
 def explain_query(topology: Topology, query: Any) -> QueryExplanation:
     table_name, name, description, filters = _parse(topology, query)

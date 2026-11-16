@@ -12,8 +12,10 @@ from .errors import (
     CFG_KEY_MISSING,
     CFG_LIST_DUPLICATE,
     CFG_NULL_POLICY,
+    CFG_RANGE_DOMAIN,
     CFG_RANGE_GAP,
     CFG_RANGE_OVERLAP,
+    CFG_RANGE_VALUE,
     CFG_ROUTER_UNKNOWN,
     CFG_SCHEMA,
     CFG_SHARD_DUPLICATE,
@@ -22,6 +24,12 @@ from .errors import (
     Issue,
 )
 from .models import RangeRule, TableTopology, Topology
+from .range_domain import (
+    RANGE_ALIAS_POLICIES,
+    RANGE_DOMAINS,
+    RangeValueError,
+    parse_range_value,
+)
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 NULL_POLICIES = {"error", "route_default", "drop"}
@@ -90,64 +98,169 @@ def _bucket_map(raw: Any, buckets: int, location: str, issues: list[Issue]) -> t
             result.append(shard)
     return tuple(result)
 
+def _range_bound_is_valid(value: Any, domain: str, *, required: bool) -> bool:
+    """Structural bound check; semantic parsing happens in the domain layer.
+
+    The text domain keeps the historical contract (a non-empty string).  Typed
+    domains accept any JSON scalar through to the parser so that floats,
+    booleans, empty strings and oversized integers are reported with the
+    domain-specific ``CFG_RANGE_VALUE`` evidence rather than a generic schema
+    error.  Containers and a missing required bound stay ``CFG_SCHEMA``.
+    """
+    if value is None:
+        return not required
+    if domain == "text":
+        return isinstance(value, str) and bool(value.strip())
+    if isinstance(value, (list, tuple, dict, set)):
+        return False
+    return True
+
+
+def _range_value_issue(error: RangeValueError, location: str) -> Issue:
+    """Convert a typed range parse failure into stable configuration evidence."""
+    return _issue(
+        CFG_RANGE_VALUE,
+        error.message,
+        location,
+        domain=error.domain,
+        raw_value=error.raw,
+        reason=error.reason,
+        **({"canonical": error.canonical} if error.canonical is not None else {}),
+    )
+
 def _validate_range(
-    raw: Any, location: str, shards: set[str], issues: list[Issue]
+    raw: Any,
+    location: str,
+    shards: set[str],
+    domain: str,
+    alias_policy: str,
+    issues: list[Issue],
 ) -> tuple[RangeRule, ...]:
     if not isinstance(raw, list) or not raw:
         issues.append(_issue(CFG_SCHEMA, "ranges must be a non-empty list", location))
         return ()
     rules: list[RangeRule] = []
+    parsed: list[tuple[RangeRule, Any, Any]] = []
+    parsed_all = True
     for index, item in enumerate(raw):
         loc = f"{location}[{index}]"
         if not isinstance(item, dict):
             issues.append(_issue(CFG_SCHEMA, "range entry must be an object", loc))
+            parsed_all = False
             continue
         lower, upper, shard = item.get("lower"), item.get("upper"), item.get("shard")
-        if not isinstance(lower, str) or not lower.strip():
-            issues.append(_issue(CFG_SCHEMA, "range lower must be a non-empty string", f"{loc}.lower"))
+        if not _range_bound_is_valid(lower, domain, required=True):
+            issues.append(
+                _issue(
+                    CFG_SCHEMA,
+                    "range lower must be a non-empty string"
+                    + (" or base-10 integer" if domain == "integer" else ""),
+                    f"{loc}.lower",
+                )
+            )
+            parsed_all = False
             continue
-        if upper is not None and (not isinstance(upper, str) or not upper.strip()):
-            issues.append(_issue(CFG_SCHEMA, "range upper must be a string or null", f"{loc}.upper"))
+        if upper is not None and not _range_bound_is_valid(upper, domain, required=False):
+            issues.append(
+                _issue(
+                    CFG_SCHEMA,
+                    "range upper must be a string, base-10 integer or null"
+                    if domain == "integer"
+                    else "range upper must be a string or null",
+                    f"{loc}.upper",
+                )
+            )
+            parsed_all = False
             continue
         if not isinstance(shard, str):
             issues.append(_issue(CFG_SHARD_UNKNOWN, "range shard must be named", f"{loc}.shard"))
+            parsed_all = False
             continue
         if shard not in shards:
             issues.append(_issue(CFG_SHARD_UNKNOWN, f"unknown shard {shard!r}", f"{loc}.shard"))
-        if upper is not None and lower >= upper:
+        lower_key: Any = None
+        upper_key: Any = None
+        lower_error = upper_error = None
+        if domain == "text":
+            lower_key, upper_key = lower, upper
+        else:
+            try:
+                parsed_lower = parse_range_value(lower, domain, alias_policy)
+                lower_key = parsed_lower.key
+            except RangeValueError as error:
+                lower_error = error
+            if upper is not None:
+                try:
+                    parsed_upper = parse_range_value(upper, domain, alias_policy)
+                    upper_key = parsed_upper.key
+                except RangeValueError as error:
+                    upper_error = error
+        if lower_error is not None:
+            issues.append(_range_value_issue(lower_error, f"{loc}.lower"))
+            parsed_all = False
+        if upper_error is not None:
+            issues.append(_range_value_issue(upper_error, f"{loc}.upper"))
+            parsed_all = False
+        if lower_error is not None or upper_error is not None:
+            continue
+        if upper is not None and lower_key >= upper_key:
+            details = {"lower": lower, "upper": upper}
+            if domain != "text":
+                details.update(
+                    {
+                        "domain": domain,
+                        "parsed_lower": lower_key,
+                        "parsed_upper": upper_key,
+                    }
+                )
             issues.append(
                 _issue(
                     CFG_RANGE_OVERLAP,
                     "range lower must be strictly less than upper",
                     loc,
-                    lower=lower,
-                    upper=upper,
+                    **details,
                 )
             )
-        rules.append(RangeRule(lower, upper, shard))
-    for index in range(1, len(rules)):
-        previous, current = rules[index - 1], rules[index]
+        rule = RangeRule(
+            lower,
+            upper,
+            shard,
+            lower_key=lower_key if domain != "text" else None,
+            upper_key=upper_key if domain != "text" else None,
+        )
+        rules.append(rule)
+        parsed.append((rule, lower_key, upper_key))
+    if not parsed_all:
+        return tuple(rules)
+    for index in range(1, len(parsed)):
+        previous, _, previous_upper = parsed[index - 1]
+        current, current_lower, _ = parsed[index]
         loc = f"{location}[{index}]"
         if previous.upper is None:
             issues.append(_issue(CFG_RANGE_OVERLAP, "no range may follow an open-ended range", loc))
-        elif previous.upper > current.lower:
-            issues.append(
-                _issue(
-                    CFG_RANGE_OVERLAP,
-                    "range overlaps the previous range",
-                    loc,
-                    previous_upper=previous.upper,
-                    lower=current.lower,
+        elif previous_upper > current_lower:
+            details = {"previous_upper": previous.upper, "lower": current.lower}
+            if domain != "text":
+                details.update(
+                    {"domain": domain, "parsed_previous_upper": previous_upper,
+                     "parsed_lower": current_lower}
                 )
+            issues.append(
+                _issue(CFG_RANGE_OVERLAP, "range overlaps the previous range", loc, **details)
             )
-        elif previous.upper < current.lower:
+        elif previous_upper < current_lower:
+            details = {"previous_upper": previous.upper, "lower": current.lower}
+            if domain != "text":
+                details.update(
+                    {"domain": domain, "parsed_previous_upper": previous_upper,
+                     "parsed_lower": current_lower}
+                )
             issues.append(
                 _issue(
                     CFG_RANGE_GAP,
                     "range leaves a gap after the previous range",
                     loc,
-                    previous_upper=previous.upper,
-                    lower=current.lower,
+                    **details,
                 )
             )
     return tuple(rules)
@@ -251,6 +364,8 @@ def validate_document(raw: Any) -> tuple[Topology | None, list[Issue], str]:
         bucket_map: tuple[str, ...] = ()
         ranges: tuple[RangeRule, ...] = ()
         list_map: dict[str, str] = {}
+        range_domain = "text"
+        range_alias_policy = "strict"
         if router == "hash":
             buckets = item.get("buckets")
             if not isinstance(buckets, int) or _is_bool(buckets) or buckets < 1:
@@ -268,7 +383,40 @@ def validate_document(raw: Any) -> tuple[Topology | None, list[Issue], str]:
         elif router == "range":
             if len(keys) != 1:
                 issues.append(_issue(CFG_KEY_MISSING, "range router requires exactly one key", f"{loc}.key"))
-            ranges = _validate_range(item.get("ranges"), f"{loc}.ranges", known_shards, issues)
+            raw_domain = item.get("range_domain", "text")
+            if not isinstance(raw_domain, str) or raw_domain not in RANGE_DOMAINS:
+                issues.append(
+                    _issue(
+                        CFG_RANGE_DOMAIN,
+                        f"range_domain must be one of {list(RANGE_DOMAINS)}",
+                        f"{loc}.range_domain",
+                        actual=raw_domain,
+                        allowed=list(RANGE_DOMAINS),
+                    )
+                )
+                raw_domain = "text"
+            range_domain = raw_domain
+            raw_alias_policy = item.get("range_alias_policy", "strict")
+            if not isinstance(raw_alias_policy, str) or raw_alias_policy not in RANGE_ALIAS_POLICIES:
+                issues.append(
+                    _issue(
+                        CFG_RANGE_DOMAIN,
+                        f"range_alias_policy must be one of {list(RANGE_ALIAS_POLICIES)}",
+                        f"{loc}.range_alias_policy",
+                        actual=raw_alias_policy,
+                        allowed=list(RANGE_ALIAS_POLICIES),
+                    )
+                )
+                raw_alias_policy = "strict"
+            range_alias_policy = raw_alias_policy
+            ranges = _validate_range(
+                item.get("ranges"),
+                f"{loc}.ranges",
+                known_shards,
+                range_domain,
+                range_alias_policy,
+                issues,
+            )
         else:
             if len(keys) != 1:
                 issues.append(_issue(CFG_KEY_MISSING, "list router requires exactly one key", f"{loc}.key"))
@@ -286,6 +434,8 @@ def validate_document(raw: Any) -> tuple[Topology | None, list[Issue], str]:
             ranges=ranges,
             list_map=list_map,
             case_sensitive=case_sensitive,
+            range_domain=range_domain,
+            range_alias_policy=range_alias_policy,
         )
     if issues:
         return None, issues, fp

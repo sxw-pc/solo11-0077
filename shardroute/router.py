@@ -10,11 +10,23 @@ from .errors import (
     ROUTE_KEY_MISSING,
     ROUTE_NO_MATCH,
     ROUTE_NULL_KEY,
+    ROUTE_RANGE_VALUE,
     RoutingError,
 )
 from .models import RouteTrace, TableTopology, Topology
+from .range_domain import (
+    RangeValueError,
+    parse_range_value,
+    rule_lower_key,
+    rule_upper_key,
+)
 
 _MISSING = object()
+
+def _bound_display(raw: Any, key: Any) -> str:
+    """Comparison label that keeps the original bound text alongside the key."""
+    text = raw if isinstance(raw, str) else str(raw)
+    return text if text == str(key) else f"{text}={key}"
 
 class Router:
     """Routes key values against an already validated topology."""
@@ -49,6 +61,14 @@ class Router:
                 table_name,
                 {"expected": len(table.key_fields), "actual": len(raw_list)},
             )
+        if table.router == "range" and table.range_domain != "text":
+            # Typed range tables own their value parsing: routing the raw
+            # representation directly preserves alias spellings and rejects
+            # wrong types/containers with domain-specific evidence instead of
+            # first coercing them to text.
+            if raw_list[0] is None:
+                return self._route_null(table, raw_reported)
+            return self._route_range(table, raw_list[0], "")
         normalized_values = normalize_components(raw_list, table.case_sensitive)
         normalized = composite_key([v for v in normalized_values if v is not None])
         if any(v is None for v in normalized_values):
@@ -56,7 +76,7 @@ class Router:
         if table.router == "hash":
             return self._route_hash(table, raw_reported, normalized)
         if table.router == "range":
-            return self._route_range(table, raw_reported, normalized_values[0] or "")
+            return self._route_range(table, raw_list[0], normalized_values[0] or "")
         return self._route_list(table, raw_reported, normalized_values[0] or "")
     def _table(self, table_name: str) -> TableTopology:
         try:
@@ -116,46 +136,82 @@ class Router:
             comparisons=(f"sha256[0:8] % {table.buckets} = {bucket}",),
         )
     def _route_range(self, table: TableTopology, raw: Any, normalized: str) -> RouteTrace:
+        typed = table.range_domain != "text"
+        if typed:
+            # Typed domains parse the raw representation; the historical
+            # string normalization is deliberately not applied first so that
+            # leading zeros and similar spellings stay visible to the policy.
+            try:
+                parsed = parse_range_value(raw, table.range_domain, table.range_alias_policy)
+            except RangeValueError as exc:
+                raise RoutingError(
+                    ROUTE_RANGE_VALUE,
+                    exc.message,
+                    table.table,
+                    {"key_field": table.key_fields[0], **exc.details()},
+                ) from exc
+            value: Any = parsed.key
+            display = parsed.canonical
+            shown = parsed.raw
+        else:
+            parsed = None
+            value = normalized
+            display = normalized
+            shown = raw
         checked: list[str] = []
         for index, rule in enumerate(table.ranges):
-            lower = normalize_value(rule.lower, table.case_sensitive) or rule.lower
-            upper = (
-                normalize_value(rule.upper, table.case_sensitive)
-                if rule.upper is not None
-                else None
-            )
-            lower_ok = normalized >= lower
-            upper_ok = upper is None or normalized < upper
-            checked.append(f"{normalized} >= {lower}: {str(lower_ok).lower()}")
+            if typed:
+                lower: Any = rule_lower_key(rule, table.range_domain, table.range_alias_policy)
+                upper: Any = rule_upper_key(rule, table.range_domain, table.range_alias_policy)
+                lower_display = _bound_display(rule.lower, lower)
+                upper_display = "inf" if upper is None else _bound_display(rule.upper, upper)
+            else:
+                lower = normalize_value(rule.lower, table.case_sensitive) or rule.lower
+                upper = (
+                    normalize_value(rule.upper, table.case_sensitive)
+                    if rule.upper is not None
+                    else None
+                )
+                lower_display = lower
+                upper_display = "" if upper is None else upper
+            lower_ok = value >= lower
+            upper_ok = upper is None or value < upper
+            checked.append(f"{display} >= {lower_display}: {str(lower_ok).lower()}")
             if upper is not None:
-                checked.append(f"{normalized} < {upper}: {str(upper_ok).lower()}")
+                checked.append(f"{display} < {upper_display}: {str(upper_ok).lower()}")
             if lower_ok and upper_ok:
                 return RouteTrace(
                     table=table.table,
                     key_fields=table.key_fields,
-                    raw_value=raw,
-                    normalized_value=normalized,
+                    raw_value=shown,
+                    normalized_value=display if typed else normalized,
                     target_shard=rule.shard,
                     rule=f"range[{index}]",
                     null_action="reject",
                     comparisons=tuple(checked),
+                    range_domain=table.range_domain if typed else None,
+                    parsed_value=parsed.evidence() if parsed is not None else None,
+                    range_alias_used=bool(parsed is not None and parsed.alias_used),
                 )
         if table.default_shard:
             return RouteTrace(
                 table=table.table,
                 key_fields=table.key_fields,
-                raw_value=raw,
-                normalized_value=normalized,
+                raw_value=shown,
+                normalized_value=display if typed else normalized,
                 target_shard=table.default_shard,
                 rule="range_default",
                 null_action="reject",
                 comparisons=tuple(checked + [f"no interval matched -> {table.default_shard}"]),
+                range_domain=table.range_domain if typed else None,
+                parsed_value=parsed.evidence() if parsed is not None else None,
+                range_alias_used=bool(parsed is not None and parsed.alias_used),
             )
         raise RoutingError(
             ROUTE_NO_MATCH,
             "value did not match any configured range",
             table.table,
-            {"value": normalized},
+            {"value": display if typed else normalized},
         )
     def _route_list(self, table: TableTopology, raw: Any, normalized: str) -> RouteTrace:
         shard = table.list_map.get(normalized)
