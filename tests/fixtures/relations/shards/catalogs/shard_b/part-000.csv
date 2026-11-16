@@ -1,0 +1,3 @@
+row_id,catalog_code,catalog_region,catalog_name
+cat_beta,CAT_BETA,region_beta,Catalog Beta
+cat_alpha,CAT_ALPHA,region_alpha,Catalog Alpha

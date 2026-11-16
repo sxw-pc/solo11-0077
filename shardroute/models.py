@@ -9,6 +9,8 @@ from .canonical import stable_id
 
 SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
+RELATION_MODES = ("local_join", "replicated_parent")
+
 @dataclass(frozen=True)
 class RangeRule:
     lower: str
@@ -57,6 +59,32 @@ class TableTopology:
         }
 
 @dataclass(frozen=True)
+class RelationContract:
+    """Declarative parent/child join contract used by the offline verifier.
+
+    ``parent_key`` names the column that uniquely identifies a parent entity
+    inside the logical snapshot; ``child_key`` names the column on the child
+    table that stores the reference value. ``mode`` is either ``local_join``
+    (parent and child must live in the same shard) or ``replicated_parent``
+    (a content-identical parent copy may live in every shard that holds a
+    referencing child row).
+    """
+    name: str
+    parent_table: str
+    parent_key: str
+    child_table: str
+    child_key: str
+    mode: str
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "parent_table": self.parent_table,
+            "parent_key": self.parent_key,
+            "child_table": self.child_table,
+            "child_key": self.child_key,
+            "mode": self.mode,
+        }
+@dataclass(frozen=True)
 class Topology:
     version: int
     shards: tuple[str, ...]
@@ -64,10 +92,15 @@ class Topology:
     generated_at: str
     description: str
     fingerprint: str
+    relations: tuple[RelationContract, ...] = ()
     def table(self, name: str) -> TableTopology:
         return self.tables[name]
     def table_names(self) -> list[str]:
         return sorted(self.tables)
+    def relation_names(self) -> list[str]:
+        return sorted(relation.name for relation in self.relations)
+    def relation_map(self) -> dict[str, RelationContract]:
+        return {relation.name: relation for relation in self.relations}
 
 @dataclass(frozen=True)
 class RouteTrace:

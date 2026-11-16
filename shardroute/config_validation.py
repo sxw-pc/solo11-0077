@@ -14,6 +14,9 @@ from .errors import (
     CFG_NULL_POLICY,
     CFG_RANGE_GAP,
     CFG_RANGE_OVERLAP,
+    CFG_RELATION_DUPLICATE,
+    CFG_RELATION_INVALID,
+    CFG_RELATION_UNKNOWN_TABLE,
     CFG_ROUTER_UNKNOWN,
     CFG_SCHEMA,
     CFG_SHARD_DUPLICATE,
@@ -21,7 +24,7 @@ from .errors import (
     CFG_TABLE_NAME,
     Issue,
 )
-from .models import RangeRule, TableTopology, Topology
+from .models import RELATION_MODES, RangeRule, RelationContract, TableTopology, Topology
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 NULL_POLICIES = {"error", "route_default", "drop"}
@@ -173,6 +176,100 @@ def _validate_list_map(
             result[normalized] = shard
     return result
 
+def _validate_relations(
+    raw: Any, tables: dict[str, TableTopology], issues: list[Issue]
+) -> tuple[RelationContract, ...]:
+    """Parse the optional declarative parent/child contract list."""
+    if raw is None:
+        return ()
+    location = "relations"
+    if not isinstance(raw, list):
+        issues.append(_issue(CFG_SCHEMA, "relations must be a list", location))
+        return ()
+    contracts: list[RelationContract] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw):
+        loc = f"{location}[{index}]"
+        if not isinstance(item, dict):
+            issues.append(_issue(CFG_SCHEMA, "relation entry must be an object", loc))
+            continue
+        name = item.get("name")
+        if not isinstance(name, str) or not NAME_RE.match(name):
+            issues.append(
+                _issue(
+                    CFG_RELATION_INVALID,
+                    "relation name must match ^[a-z][a-z0-9_]{0,62}$",
+                    f"{loc}.name",
+                )
+            )
+            continue
+        if name in seen:
+            issues.append(_issue(CFG_RELATION_DUPLICATE, f"duplicate relation {name!r}", f"{loc}.name"))
+            continue
+        seen.add(name)
+        parent_table = item.get("parent_table")
+        child_table = item.get("child_table")
+        if not isinstance(parent_table, str) or not NAME_RE.match(parent_table):
+            issues.append(_issue(CFG_SCHEMA, "parent_table must be a table name", f"{loc}.parent_table"))
+            continue
+        if not isinstance(child_table, str) or not NAME_RE.match(child_table):
+            issues.append(_issue(CFG_SCHEMA, "child_table must be a table name", f"{loc}.child_table"))
+            continue
+        for field, table in (("parent_table", parent_table), ("child_table", child_table)):
+            if table not in tables:
+                issues.append(
+                    _issue(
+                        CFG_RELATION_UNKNOWN_TABLE,
+                        f"relation references undeclared table {table!r}",
+                        f"{loc}.{field}",
+                    )
+                )
+        if parent_table == child_table:
+            issues.append(
+                _issue(
+                    CFG_RELATION_INVALID,
+                    "parent_table and child_table must differ",
+                    loc,
+                )
+            )
+        parent_key = item.get("parent_key")
+        child_key = item.get("child_key")
+        keys_valid = True
+        for field, value in (("parent_key", parent_key), ("child_key", child_key)):
+            if not isinstance(value, str) or not value.strip() or value == "row_id":
+                issues.append(
+                    _issue(
+                        CFG_RELATION_INVALID,
+                        f"{field} must be a non-empty column name other than row_id",
+                        f"{loc}.{field}",
+                    )
+                )
+                keys_valid = False
+        mode = item.get("mode")
+        if not isinstance(mode, str) or mode not in RELATION_MODES:
+            issues.append(
+                _issue(
+                    CFG_RELATION_INVALID,
+                    f"mode must be one of {list(RELATION_MODES)}",
+                    f"{loc}.mode",
+                )
+            )
+            continue
+        if not keys_valid:
+            continue
+        contracts.append(
+            RelationContract(
+                name=f"{name}",
+                parent_table=parent_table,
+                parent_key=parent_key,
+                child_table=child_table,
+                child_key=child_key,
+                mode=mode,
+            )
+        )
+    return tuple(contracts)
+
+
 def validate_document(raw: Any) -> tuple[Topology | None, list[Issue], str]:
     issues: list[Issue] = []
     fp = fingerprint(raw) if raw is not None else ""
@@ -289,6 +386,9 @@ def validate_document(raw: Any) -> tuple[Topology | None, list[Issue], str]:
         )
     if issues:
         return None, issues, fp
+    relations = _validate_relations(raw.get("relations"), tables, issues)
+    if issues:
+        return None, issues, fp
     topology = Topology(
         version=version,
         shards=tuple(shard_list),
@@ -296,5 +396,6 @@ def validate_document(raw: Any) -> tuple[Topology | None, list[Issue], str]:
         generated_at=generated_at,
         description=description,
         fingerprint=fp,
+        relations=relations,
     )
     return topology, [], fp

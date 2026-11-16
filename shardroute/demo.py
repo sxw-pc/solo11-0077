@@ -14,6 +14,7 @@ from .fixturegen import DEMO_SEED, build_fixtures
 from .ledger import Ledger
 from .planner import build_plan
 from .query_explain import explain_file
+from .relations import evaluate_relations
 from .report import build_report, write_reports
 from .scanner import scan_workspace
 
@@ -52,8 +53,9 @@ def run_pipeline(workspace: str | Path, seed: int = DEMO_SEED) -> dict[str, Any]
     old = load_topology(required[0])
     new = load_topology(required[1])
     scan = scan_workspace(root / "logical", root / "shards", old.table_names())
-    audit = run_audit(old, scan)
-    plan = build_plan(old, new, scan.logical_rows, audit)
+    relation = evaluate_relations(old, scan, target=new)
+    audit = run_audit(old, scan, relation=relation)
+    plan = build_plan(old, new, scan.logical_rows, audit, scan=scan, relation=relation)
     queries = [explain_file(old, path) for path in _query_files(root)]
     report = build_report(
         old=old,

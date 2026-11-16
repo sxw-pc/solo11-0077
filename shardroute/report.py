@@ -50,6 +50,25 @@ def build_report(
     pruned = sum(1 for item in query_dicts if item["decision"] == "pruned")
     safe = bool(plan.get("safe_to_execute"))
     status = "fail" if audit["status"] == "fail" or not safe else audit["status"]
+    summary: dict[str, Any] = {
+        "audit_findings": audit["summary"]["total_findings"],
+        "critical_or_high": audit["summary"]["critical_or_high"],
+        "rows_moved": plan["moved_rows"],
+        "rows_unchanged": plan["unchanged_rows"],
+        "move_cells": len(plan["move_cells"]),
+        "batches": len(plan["batches"]),
+        "blockers": len(plan["blockers"]),
+        "queries": len(query_dicts),
+        "pruned_queries": pruned,
+        "safe_to_execute": safe,
+    }
+    if plan.get("relations"):
+        summary["relation_contracts"] = (
+            plan["relations"].get("summary", {}).get("contracts", 0)
+        )
+        summary["relation_blockers"] = sum(
+            1 for item in plan["blockers"] if item["code"].startswith("PLAN_RELATION_")
+        )
     report = {
         "format": RUN_FORMAT,
         "run_id": run_id,
@@ -63,18 +82,7 @@ def build_report(
             "physical": physical_fingerprint,
         },
         "topologies": {"old": _topology_summary(old), "new": _topology_summary(new)},
-        "summary": {
-            "audit_findings": audit["summary"]["total_findings"],
-            "critical_or_high": audit["summary"]["critical_or_high"],
-            "rows_moved": plan["moved_rows"],
-            "rows_unchanged": plan["unchanged_rows"],
-            "move_cells": len(plan["move_cells"]),
-            "batches": len(plan["batches"]),
-            "blockers": len(plan["blockers"]),
-            "queries": len(query_dicts),
-            "pruned_queries": pruned,
-            "safe_to_execute": safe,
-        },
+        "summary": summary,
         "audit": audit,
         "plan": plan,
         "queries": query_dicts,
@@ -188,6 +196,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             )
     else:
         lines.append("- No blockers. This remains a dry-run plan only.")
+    relations = report["plan"].get("relations") or report["audit"].get("relations")
+    if relations:
+        lines.extend(_render_relations_markdown(relations))
     lines.extend(["", "## Query pruning", "", "| Query | Table | Decision | Target shards | Reason |", "|---|---|---|---|---|"])
     for query in report["queries"]:
         targets = ", ".join(query["targeted_shards"]) or "none"
@@ -214,6 +225,79 @@ def render_markdown(report: dict[str, Any]) -> str:
         ]
     )
     return "\n".join(lines)
+
+def _render_relations_markdown(relations: dict[str, Any]) -> list[str]:
+    summary = relations.get("summary", {})
+    lines = [
+        "",
+        "## Declared relation verification",
+        "",
+        f"- contracts: {summary.get('contracts', 0)} "
+        f"(target: {summary.get('target_contracts', 0)})",
+        f"- old topology verdict: **{summary.get('old_status', 'pass')}** "
+        f"({summary.get('old_blocked', 0)} blocked of {summary.get('evaluations', 0)})",
+        f"- target topology verdict: **{summary.get('new_status', 'not_evaluated')}** "
+        f"({summary.get('new_blocked', 0)} blocked)",
+        "",
+        "| Relation | Mode | Parent | Child | Child row | Parent row | "
+        "Old | Old shards (child→parent) | New | New shards (child→parent) |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for item in relations.get("evaluations", []):
+        old = item.get("old", {})
+        new = item.get("new")
+        old_shards = f"{_cell(old.get('child_routed_shard') or '-')} → " \
+            f"{_cell(old.get('parent_routed_shard') or '-')}"
+        if new is not None:
+            new_status = "blocked" if new.get("status") == "blocked" else "satisfied"
+            new_shards = f"{_cell(new.get('child_target_shard') or '-')} → " \
+                f"{_cell(new.get('parent_target_shard') or '-')}"
+        else:
+            new_status = "not_evaluated"
+            new_shards = "-"
+        lines.append(
+            "| {relation} | {mode} | {parent} | {child} | {child_row} | {parent_row} | "
+            "{old} | {old_shards} | {new} | {new_shards} |".format(
+                relation=_cell(item.get("relation")),
+                mode=_cell(item.get("mode")),
+                parent=_cell(item.get("parent_table")),
+                child=_cell(item.get("child_table")),
+                child_row=_cell(item.get("child_row_id") or "-"),
+                parent_row=_cell(item.get("parent_row_id") or "-"),
+                old=_cell(old.get("status") or "-"),
+                old_shards=old_shards,
+                new=_cell(new_status),
+                new_shards=new_shards,
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "### Relation findings",
+            "",
+            "| Severity | Code | Phase | Relation | Child row | Parent row | Shard | Message |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+    )
+    if not relations.get("findings"):
+        lines.append("| - | - | - | - | - | - | - | No relation findings |")
+    for finding in relations.get("findings", []):
+        detail = finding.get("detail", {})
+        lines.append(
+            "| {severity} | {code} | {phase} | {relation} | {child} | {parent} | "
+            "{shard} | {message} |".format(
+                severity=_cell(finding.get("severity")),
+                code=_cell(finding.get("code")),
+                phase=_cell(detail.get("phase") or "-"),
+                relation=_cell(detail.get("relation") or "-"),
+                child=_cell(finding.get("row_id") or "-"),
+                parent=_cell(detail.get("parent_row_id") or "-"),
+                shard=_cell(finding.get("shard") or "-"),
+                message=_cell(finding.get("message")),
+            )
+        )
+    return lines
+
 
 def write_reports(report: dict[str, Any], workspace: str | Path) -> list[dict[str, Any]]:
     root = Path(workspace) / "reports"

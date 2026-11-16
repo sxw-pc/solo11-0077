@@ -15,6 +15,7 @@ from .demo import run_demo, run_pipeline
 from .errors import CLI_USAGE, ConfigValidationError, ShardRouteError
 from .planner import build_plan
 from .query_explain import explain_file
+from .relations import evaluate_relations
 from .router import Router
 from .scanner import scan_workspace
 
@@ -57,8 +58,9 @@ def _cmd_plan(args: argparse.Namespace) -> int:
     old, new = load_topology(old_path), load_topology(new_path)
     root = Path(args.workspace)
     scan = scan_workspace(root / "logical", root / "shards", old.table_names())
-    audit = run_audit(old, scan)
-    _emit(build_plan(old, new, scan.logical_rows, audit))
+    relation = evaluate_relations(old, scan, target=new)
+    audit = run_audit(old, scan, relation=relation)
+    _emit(build_plan(old, new, scan.logical_rows, audit, scan=scan, relation=relation))
     return 0
 
 def _cmd_explain(args: argparse.Namespace) -> int:

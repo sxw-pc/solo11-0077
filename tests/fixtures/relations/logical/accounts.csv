@@ -1,0 +1,6 @@
+row_id,account_code,home_region,account_name
+acc_alpha,ACC_ALPHA,region_alpha,Account Alpha
+acc_split,ACC_SPLIT,region_beta,Account Split
+acc_dup_1,ACC_BETA,region_beta,Account Beta One
+acc_dup_2,ACC_BETA,region_beta,Account Beta Two
+acc_gamma,ACC_GAMMA,region_gamma,Account Gamma v1

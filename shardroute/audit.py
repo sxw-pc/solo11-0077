@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from typing import Any
-
 from .errors import ShardRouteError
 from .models import ScanResult, Topology, make_finding
 from .manifest_audit import _audit_manifests
+from .relations import evaluate_relations
 from .router import Router
 
 SEVERITY_ORDER = ("critical", "high", "medium", "low", "info")
@@ -19,7 +19,11 @@ def _placement_rows(scan: ScanResult) -> dict[str, dict[str, list[Any]]]:
             grouped[table][row.row_id].append(row)
     return {table: dict(by_id) for table, by_id in grouped.items()}
 
-def _audit_placements(topology: Topology, scan: ScanResult) -> list[Any]:
+def _audit_placements(
+    topology: Topology,
+    scan: ScanResult,
+    allowed_replicas: frozenset[tuple[str, str, str]] = frozenset(),
+) -> list[Any]:
     router = Router(topology)
     findings = []
     placements = _placement_rows(scan)
@@ -44,6 +48,11 @@ def _audit_placements(topology: Topology, scan: ScanResult) -> list[Any]:
                 )
                 continue
             places = sorted(physical.get(row.row_id, []), key=lambda p: (p.shard, p.source, p.line_no))
+            permitted = {
+                shard for (allowed_table, allowed_row, shard) in allowed_replicas
+                if allowed_table == table_name and allowed_row == row.row_id
+            }
+            canonical = [place for place in places if place.shard not in permitted]
             if trace.dropped:
                 if places:
                     findings.append(
@@ -59,7 +68,16 @@ def _audit_placements(topology: Topology, scan: ScanResult) -> list[Any]:
                     )
                 continue
             expected = trace.target_shard or ""
-            if not places:
+            # A copied parent proven by a declared replicated_parent contract is
+            # not a placement defect by itself.  Canonical placements are the
+            # routed shard plus any shard the contract did not vouch for; the
+            # routed copy still has to exist and undeclared extras still count.
+            canonical = [
+                place
+                for place in places
+                if place.shard == expected or place.shard not in permitted
+            ]
+            if not canonical:
                 findings.append(
                     make_finding(
                         "MISSING_ROW",
@@ -71,39 +89,40 @@ def _audit_placements(topology: Topology, scan: ScanResult) -> list[Any]:
                         detail={"expected_shard": expected, "logical_source": row.source},
                     )
                 )
-            elif len(places) > 1:
-                shards = sorted({place.shard for place in places})
+            elif len(canonical) > 1:
+                shards = sorted({place.shard for place in canonical})
                 findings.append(
                     make_finding(
                         "DUPLICATE_ROW",
                         "critical",
                         table_name,
-                        f"row appears {len(places)} times across {len(shards)} shard(s)",
+                        f"row appears {len(canonical)} times across {len(shards)} shard(s)",
                         shard=expected,
                         row_id=row.row_id,
                         detail={
                             "expected_shard": expected,
                             "shards": shards,
                             "placements": [
-                                {"shard": p.shard, "path": p.source, "line": p.line_no} for p in places
+                                {"shard": p.shard, "path": p.source, "line": p.line_no}
+                                for p in canonical
                             ],
                         },
                     )
                 )
-            elif places[0].shard != expected:
+            elif canonical[0].shard != expected:
                 findings.append(
                     make_finding(
                         "MISPLACED_ROW",
                         "critical",
                         table_name,
-                        f"row is in {places[0].shard} but routes to {expected}",
-                        shard=places[0].shard,
+                        f"row is in {canonical[0].shard} but routes to {expected}",
+                        shard=canonical[0].shard,
                         row_id=row.row_id,
                         detail={
                             "expected_shard": expected,
-                            "actual_shard": places[0].shard,
-                            "path": places[0].source,
-                            "line": places[0].line_no,
+                            "actual_shard": canonical[0].shard,
+                            "path": canonical[0].source,
+                            "line": canonical[0].line_no,
                             "trace": trace.as_dict(),
                         },
                     )
@@ -136,8 +155,23 @@ def _audit_placements(topology: Topology, scan: ScanResult) -> list[Any]:
                 )
     return findings
 
-def run_audit(topology: Topology, scan: ScanResult) -> dict[str, Any]:
-    findings = _audit_placements(topology, scan) + _audit_manifests(topology, scan)
+def run_audit(
+    topology: Topology,
+    scan: ScanResult,
+    relation: Any | None = None,
+) -> dict[str, Any]:
+    """Audit one topology's physical tree.
+
+    ``relation`` may carry a pre-computed (old + target) evaluation so the
+    report and the plan share exactly the same evidence.  When omitted, an
+    old-only evaluation is computed from the topology itself.
+    """
+    if relation is None:
+        relation = evaluate_relations(topology, scan)
+    allowed = relation.allowed_replicas if relation is not None else frozenset()
+    findings = _audit_placements(topology, scan, allowed) + _audit_manifests(topology, scan)
+    if relation is not None:
+        findings.extend(relation.findings)
     unique = {finding.finding_id: finding for finding in findings}
     ordered = sorted(unique.values(), key=lambda finding: finding.sort_key())
     by_code = Counter(finding.code for finding in ordered)
@@ -156,7 +190,7 @@ def run_audit(topology: Topology, scan: ScanResult) -> dict[str, Any]:
         }
     critical = sum(1 for finding in ordered if finding.severity in {"critical", "high"})
     status = "fail" if critical else ("attention" if ordered else "pass")
-    return {
+    result = {
         "status": status,
         "summary": {
             "total_findings": len(ordered),
@@ -167,3 +201,6 @@ def run_audit(topology: Topology, scan: ScanResult) -> dict[str, Any]:
         "tables": by_table,
         "findings": [finding.as_dict() for finding in ordered],
     }
+    if relation is not None:
+        result["relations"] = relation.report
+    return result

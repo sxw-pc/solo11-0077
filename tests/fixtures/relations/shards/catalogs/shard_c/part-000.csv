@@ -1,0 +1,3 @@
+row_id,catalog_code,catalog_region,catalog_name
+cat_gamma,CAT_GAMMA,region_gamma,Catalog Gamma stale
+cat_alpha,CAT_ALPHA,region_alpha,Catalog Alpha

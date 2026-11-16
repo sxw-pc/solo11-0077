@@ -1,0 +1,6 @@
+{"catalog_ref": "CAT_ALPHA", "region": "region_alpha", "row_id": "it_alpha", "sku": "sku_alpha"}
+{"catalog_ref": "CAT_ALPHA", "region": "region_beta", "row_id": "it_peer", "sku": "sku_peer"}
+{"catalog_ref": "CAT_BETA", "region": "region_beta", "row_id": "it_target", "sku": "sku_target"}
+{"catalog_ref": "CAT_GAMMA", "region": "region_gamma", "row_id": "it_drift", "sku": "sku_drift"}
+{"catalog_ref": "CAT_ALPHA", "region": "region_gamma", "row_id": "it_replicated", "sku": "sku_rep"}
+{"catalog_ref": "", "region": "region_alpha", "row_id": "it_noref", "sku": "sku_noref"}

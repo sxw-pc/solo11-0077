@@ -1,0 +1,14 @@
+{
+  "files": [
+    {
+      "name": "part-000.csv",
+      "rows": 2,
+      "sha256": "e53faecebdff3ecdfaebd42a3b068c4ebaae4974c6c298878c8cb326a11b2ac7"
+    }
+  ],
+  "format_version": 1,
+  "generated_at": "2026-01-02T03:04:05Z",
+  "row_count": 2,
+  "shard": "shard_b",
+  "table": "catalogs"
+}

@@ -1,0 +1,6 @@
+row_id,region,account_ref,amount
+ord_ok,region_alpha,ACC_ALPHA,10.00
+ord_repeat_1,region_alpha,ACC_ALPHA,11.00
+ord_repeat_2,region_alpha,ACC_ALPHA,12.00
+ord_missing,region_alpha,ACC_MISSING,30.00
+ord_noref,region_alpha,,60.00

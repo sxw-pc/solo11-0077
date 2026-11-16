@@ -1,0 +1,14 @@
+{
+  "files": [
+    {
+      "name": "part-000.jsonl",
+      "rows": 2,
+      "sha256": "401152387c2db84c41f5a89b8bcbeddbc11c2105a87f3e707a81b322175915ca"
+    }
+  ],
+  "format_version": 1,
+  "generated_at": "2026-01-02T03:04:05Z",
+  "row_count": 2,
+  "shard": "shard_c",
+  "table": "order_items"
+}

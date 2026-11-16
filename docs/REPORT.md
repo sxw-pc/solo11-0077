@@ -87,6 +87,35 @@ findings[]:
 
 发现数组按严重度、表名、代码、分片、row_id、finding_id 稳定排序。
 
+声明了 `relations` 的工作区还会在 `audit` 与 `plan` 下各出现一个相同的 `relations` 对象（`plan.relations` 与 `audit.relations` 逐字段一致）：
+
+```text
+declared[]:        {name, parent_table, parent_key, child_table, child_key, mode}
+target_declared[]: 目标拓扑声明的契约（用于核对两侧声明是否一致）
+summary:
+  contracts, target_contracts, evaluations,
+  old_blocked, new_blocked, old_findings, new_findings,
+  old_status, new_status, findings
+relations[]:       {name, parent_table, parent_key, child_table, child_key, mode,
+                    old: {status, evaluations, blocked}, new: {status, evaluations, blocked}}
+evaluations[]:
+  relation, mode, parent_table, parent_key, child_table, child_key,
+  child_row_id, child_source, parent_row_id, reference,
+  old: {status, codes, child_routed_shard, parent_routed_shard,
+        child_shards, parent_shards, parent_business_fingerprint,
+        parent_row_id, replicas[]}
+  new: {status, codes, child_target_shard, parent_target_shard,
+        replica/ target_replica[]}
+findings[]:        RELATION_* 发现项，detail 内含 phase/relation/具体子父行与分片证据
+```
+
+- `status` 只取 `satisfied` / `blocked`；`old_status`/`new_status` 取 `pass`/`fail`（未提供目标拓扑时 `new_status` 为 `not_evaluated`）。
+- `parent_business_fingerprint` 是父行除 `row_id` 外全部业务字段的规范化 JSON SHA-256；副本的 `business_fingerprint` 与它相同才算同一父实体。
+- `replicas[]` 每项含 `row_id`、`shard`、`path`、`line`、`business_fingerprint`、`matches_logical_parent`、`same_row_id`，`replicated_parent` 下另含 `manifest_evidence`（`ok`、`reason`、`manifest`、`file`、`sha256`）。
+- `plan.blockers[]` 中关联阻断项形如 `PLAN_RELATION_<phase>_<relation>_<code>`，额外带 `relation`、`phase`、`relation_code`、`evidence.child_row_ids`（最多 20 个）和 `evidence.child_row_total`，与 `relations.evaluations` 一一对应。
+- 调度顺序稳定：`evaluations` 按 `(relation, child_row_id)` 排序，因此同一父行被多子行引用时报告与阻断项不随输入行序变化。
+- 未声明关联时 `audit.relations`、`plan.relations`、`summary.relation_contracts` 等字段不出现，旧报告的 JSON 结构不变。
+
 ### plan 对象
 
 ```text
@@ -100,7 +129,7 @@ safe_to_execute: bool
 summary: {tables, moved_by_table, move_cell_count, batch_count, max_batch_rows}
 ```
 
-`move_cells` 是旧拓扑目标与新拓扑目标不同的行数聚合，按 `(table, from_shard, to_shard)` 排序。批次是 shadow-copy 阶段每 80 行一片，`batch_id` 为 `batch-001` 起的三位序号。blocking 阻塞项使 `safe_to_execute=false`；review 项不会单独阻止计划。
+`move_cells` 是旧拓扑目标与新拓扑目标不同的行数聚合，按 `(table, from_shard, to_shard)` 排序。批次是 shadow-copy 阶段每 80 行一片，`batch_id` 为 `batch-001` 起的三位序号。blocking 阻塞项使 `safe_to_execute=false`；review 项不会单独阻止计划。声明了关联时，`plan.relations` 与 `audit.relations` 一致，`summary.relation_blockers` 统计 `PLAN_RELATION_*` 阻塞项数量。
 
 ### queries 数组
 
@@ -134,9 +163,10 @@ coverage_ratio, trace
 5. Reshard move matrix 表。
 6. Batch plan 表。
 7. Blockers 列表。
-8. Query pruning 表。
-9. Rollback checklist。
-10. Boundary notice 与复现命令。
+8. Declared relation verification（仅当声明了关联时出现）：按子行列出旧/新拓扑判定、子→父分片，以及 `RELATION_*` 发现。
+9. Query pruning 表。
+10. Rollback checklist。
+11. Boundary notice 与复现命令。
 
 单元格中的 `|`、回车和换行会被转义为单行文本；空值显示为 `-`。Markdown 不嵌入 HTML 或脚本。
 

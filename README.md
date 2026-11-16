@@ -9,6 +9,8 @@ ShardRoute 是一个**完全离线、确定性、只用 Python 标准库**的分
 
 它只读取本地 CSV / JSONL 合成文件与本地 SQLite 台账。逻辑快照可使用 `.csv` 或 `.jsonl`；物理分片目录可混用两种格式，但同一逻辑表不能同时存在两种格式的快照。**不连接数据库、不执行 SQL、不执行迁移、不写物理分片、不发起任何外部网络请求。**
 
+拓扑可选声明 `relations` 父子关联契约，用于离线核验一条子行能否从声明的物理分片取得其父行。支持 `local_join`（父子必须同分片）与 `replicated_parent`（父行可在每个有引用子行的分片保留内容一致的副本）。未声明时工具保持原有单表审计与计划行为。详见 [docs/CONFIG.md](docs/CONFIG.md) 第 7 节。
+
 ---
 
 ## 快速开始
@@ -58,6 +60,26 @@ python -m unittest discover -s tests -v
 ```
 
 仓库内也提交了一份相同的静态 fixture 集合于 `fixtures/`，便于不运行 demo 时直接审阅。所有表名、租户、区域、行 ID 均为合成值。重复运行 `demo` 对同一工作区产生字节一致的数据与报告（SQLite 文件本身不作为字节级复现承诺）。
+
+### 父子关联 fixture
+
+`tests/fixtures/relations/` 是一份独立的小型合成工作区，演示声明式关联核验：
+
+```text
+tests/fixtures/relations/
+├── config/{topology_old,topology_new}.json   # 声明 local_join 与 replicated_parent
+├── logical/{accounts,orders,catalogs}.csv
+├── logical/order_items.jsonl
+└── shards/<table>/<shard>/{part-000.csv|part-000.jsonl,_manifest.json}
+```
+
+该 fixture 刻意包含四类必须分别识别的失败：缺父（`RELATION_PARENT_MISSING`）、重复父（`RELATION_PARENT_DUPLICATE`）、父副本内容漂移（`RELATION_PARENT_REPLICA_DRIFT`），以及目标拓扑把子行移到无父副本分片（`RELATION_TARGET_PARENT_MISSING`）。同时包含 `local_join` 被目标拆分阻断、而 `replicated_parent` 因存在内容一致且有 manifest 证据的副本而通过的对照。复现：
+
+```bash
+python -m shardroute plan --workspace tests/fixtures/relations
+# 或重新生成该 fixture（确定性，字节一致）
+python tests/fixtures/relations/generate.py
+```
 
 ---
 
@@ -158,4 +180,4 @@ python -m shardroute route --config fixtures/config/topology_old.json \
 python -m unittest discover -s tests -v
 ```
 
-测试覆盖规范化、配置错误码、三种路由、扫描与 manifest、异常分类、移动计划、查询裁剪、三种报告、SQLite 幂等、只读 HTTP 服务和完整 demo 的字节级复现。测试只使用临时目录与 `tests/fixtures/` 下的小型 fixture。
+测试覆盖规范化、配置错误码、三种路由、扫描与 manifest、异常分类、移动计划、查询裁剪、三种报告、SQLite 幂等、只读 HTTP 服务、完整 demo 的字节级复现，以及声明式父子关联契约的旧/新拓扑判定、两种执行形态、计划阻断与旧无契约工作区兼容。测试只使用临时目录与 `tests/fixtures/` 下的小型 fixture。

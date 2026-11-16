@@ -102,6 +102,60 @@ def render_html(report: dict[str, Any]) -> str:
         f"<pre>{_e(_json(query['trace']))}</pre></details>"
         for query in report["queries"]
     )
+    relations = plan.get("relations") or audit.get("relations")
+    relation_section = ""
+    if relations:
+        rel_rows = []
+        for item in relations.get("evaluations", []):
+            old = item.get("old", {})
+            new = item.get("new")
+            new_status = (
+                ("blocked" if new.get("status") == "blocked" else "satisfied")
+                if new is not None
+                else "not_evaluated"
+            )
+            old_shards = (
+                f"{old.get('child_routed_shard') or '-'} → {old.get('parent_routed_shard') or '-'}"
+            )
+            new_shards = (
+                f"{new.get('child_target_shard') or '-'} → {new.get('parent_target_shard') or '-'}"
+                if new is not None
+                else "-"
+            )
+            rel_rows.append(
+                f"<tr><td><code>{_e(item.get('relation'))}</code></td>"
+                f"<td>{_e(item.get('mode'))}</td><td>{_e(item.get('parent_table'))}</td>"
+                f"<td>{_e(item.get('child_table'))}</td>"
+                f"<td><code>{_e(item.get('child_row_id') or '-')}</code></td>"
+                f"<td><code>{_e(item.get('parent_row_id') or '-')}</code></td>"
+                f"<td>{_badge(old.get('status') or '-')}</td><td>{_e(old_shards)}</td>"
+                f"<td>{_badge(new_status)}</td><td>{_e(new_shards)}</td></tr>"
+            )
+        rel_findings = []
+        for finding in relations.get("findings", []):
+            detail = finding.get("detail", {})
+            rel_findings.append(
+                f"<tr><td>{_badge(finding['severity'])}</td><td><code>{_e(finding['code'])}</code></td>"
+                f"<td>{_e(detail.get('phase') or '-')}</td>"
+                f"<td>{_e(detail.get('relation') or '-')}</td>"
+                f"<td><code>{_e(finding.get('row_id') or '-')}</code></td>"
+                f"<td><code>{_e(detail.get('parent_row_id') or '-')}</code></td>"
+                f"<td>{_e(finding.get('shard') or '-')}</td><td>{_e(finding['message'])}</td></tr>"
+            )
+        relation_section = (
+            "<section id=\"relations\"><h2>Declared relation verification</h2>"
+            f"<p>Old topology: <strong>{_e(relations.get('summary', {}).get('old_status', 'pass'))}</strong>"
+            f" · target: <strong>{_e(relations.get('summary', {}).get('new_status', 'not_evaluated'))}</strong>"
+            "</p><div class=\"wrap\"><table><thead><tr><th>Relation</th><th>Mode</th>"
+            "<th>Parent</th><th>Child</th><th>Child row</th><th>Parent row</th>"
+            "<th>Old</th><th>Old shards</th><th>Target</th><th>Target shards</th></tr></thead><tbody>"
+            + (''.join(rel_rows) or '<tr><td colspan="10" class="empty">No evaluations.</td></tr>')
+            + "</tbody></table></div><h3>Relation findings</h3><div class=\"wrap\"><table><thead><tr>"
+            "<th>Severity</th><th>Code</th><th>Phase</th><th>Relation</th><th>Child row</th>"
+            "<th>Parent row</th><th>Shard</th><th>Message</th></tr></thead><tbody>"
+            + (''.join(rel_findings) or '<tr><td colspan="8" class="empty">No relation findings.</td></tr>')
+            + "</tbody></table></div></section>"
+        )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -114,7 +168,7 @@ def render_html(report: dict[str, Any]) -> str:
 <p class="muted">Offline audit, reshard dry-run and query-pruning explanation · run <code>{_e(report['run_id'])}</code></p>
 <p>{_badge(report['status'])} <span class="muted">generated {_e(report['generated_at'])} · seed {_e(report['seed'])}</span></p>
 <nav class="anchors"><a href="#summary">Summary</a><a href="#findings">Findings</a>
-<a href="#plan">Reshard plan</a><a href="#queries">Queries</a><a href="#rollback">Rollback</a></nav>
+<a href="#plan">Reshard plan</a>{'<a href="#relations">Relations</a>' if relation_section else ''}<a href="#queries">Queries</a><a href="#rollback">Rollback</a></nav>
 </header>
 <section id="summary"><h2>Executive summary</h2>
 <div class="grid">
@@ -124,6 +178,7 @@ def render_html(report: dict[str, Any]) -> str:
 <div class="stat"><b>{summary['batches']}</b><span>shadow batches</span></div>
 <div class="stat"><b>{summary['blockers']}</b><span>blockers</span></div>
 <div class="stat"><b>{summary['pruned_queries']}/{summary['queries']}</b><span>queries pruned</span></div>
+{f'<div class="stat"><b>{summary.get("relation_contracts", 0)}</b><span>relation contracts</span></div>' if summary.get('relation_contracts') else ''}
 </div>
 <h3>Configuration fingerprints</h3>
 {_kv([('Old topology', report['fingerprints']['topology_old']),
@@ -152,6 +207,7 @@ No data was moved by this tool.</p>
 </tbody></table></div>
 <h3>Blockers</h3><ul>{blockers}</ul>
 </section>
+{relation_section}
 <section id="queries"><h2>Query pruning</h2>
 <div class="wrap"><table><thead><tr><th>Query</th><th>Table</th><th>Decision</th>
 <th>Target shards</th><th>Reason</th></tr></thead><tbody>{''.join(query_rows)}</tbody></table></div>

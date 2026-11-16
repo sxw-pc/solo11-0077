@@ -188,7 +188,73 @@ SHA-256(UTF-8(normalized composite key))
 
 ---
 
-## 7. 校验错误码
+## 7. 声明式父子关联契约（可选）
+
+顶层可选字段 `relations` 声明父子表之间的外键关联，供离线核验。缺失该字段时行为与旧版本完全一致：审计和计划只做单表落位判定，报告不出现 `relations` 段。
+
+```json
+"relations": [
+  {
+    "name": "orders_accounts",
+    "parent_table": "accounts",
+    "parent_key": "account_code",
+    "child_table": "orders",
+    "child_key": "account_ref",
+    "mode": "local_join"
+  },
+  {
+    "name": "items_catalogs",
+    "parent_table": "catalogs",
+    "parent_key": "catalog_code",
+    "child_table": "order_items",
+    "child_key": "catalog_ref",
+    "mode": "replicated_parent"
+  }
+]
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `name` | 字符串 | 是 | 关联名称，匹配 `^[a-z][a-z0-9_]{0,62}$`，在单个拓扑内唯一 |
+| `parent_table` | 字符串 | 是 | 父表，必须已在 `tables` 中声明 |
+| `parent_key` | 字符串 | 是 | 父表唯一业务标识列，不能是 `row_id` |
+| `child_table` | 字符串 | 是 | 子表，必须已在 `tables` 中声明，且不得等于父表 |
+| `child_key` | 字符串 | 是 | 子表存放引用值的列，不能是 `row_id` |
+| `mode` | 字符串 | 是 | 查询执行形态：`local_join` 或 `replicated_parent` |
+
+两种执行形态的语义：
+
+- **`local_join`**：子行与其唯一父行必须落在**同一个分片**。核验时以物理落位为准：只要某个持有子行的分片没有内容一致的父行副本，或目标拓扑会把子行移到没有父行的分片，关联即被阻断。
+- **`replicated_parent`**：允许父行在**每个持有引用子行的分片**保留一份内容一致的副本。核验要求每个相关分片都存在一份业务字段指纹与逻辑父行完全一致、且其物理文件在 `_manifest.json` 中有匹配 `name`/`sha256`/`rows` 证据的副本。同名但内容不同（指纹不同）的父行不算同一父实体。
+
+判定规则（引用值缺失、父行不存在、父标识不唯一都不会被误判为可用）：
+
+| 判定 | 触发条件 |
+|---|---|
+| `RELATION_REFERENCE_MISSING` | 子行缺少 `child_key` 或值为空 |
+| `RELATION_PARENT_KEY_MISSING` | 父行缺少可用的 `parent_key` 标识 |
+| `RELATION_PARENT_MISSING` | 逻辑快照中没有任何父行具有该引用值 |
+| `RELATION_PARENT_DUPLICATE` | 多条父行共享同一 `parent_key`，无法确定唯一父行 |
+| `RELATION_PARENT_CONFLICT` | 物理树中子行分片存在同键但 `row_id` 不同的父行（不同实体） |
+| `RELATION_CHILD_COPY_MISSING` | 子行在其路由分片中不存在 |
+| `RELATION_SHARD_SPLIT` | `local_join` 下持有子行的分片没有父行副本 |
+| `RELATION_PARENT_COPY_MISSING` | `local_join` 父行在物理树中完全不存在 |
+| `RELATION_PARENT_REPLICA_MISSING` | `replicated_parent` 下某子行分片没有父行副本 |
+| `RELATION_PARENT_REPLICA_DRIFT` | 父副本 `row_id` 相同但业务字段指纹与逻辑父行不一致 |
+| `RELATION_MANIFEST_EVIDENCE_MISSING` | 父副本文件缺少匹配的分片 manifest 条目 |
+| `RELATION_TARGET_SPLIT` | 目标拓扑把 `local_join` 的父/子路由到不同分片 |
+| `RELATION_TARGET_PARENT_MISSING` | 目标拓扑把子行移到的分片没有父副本 |
+| `RELATION_TARGET_PARENT_DRIFT` | 目标子行分片只有内容不一致的父副本 |
+| `RELATION_TARGET_TABLE_MISSING` | 目标拓扑缺少父表或子表 |
+| `RELATION_ROUTE_ERROR` | 父行或子行无法在对应拓扑中路由 |
+
+所有 `RELATION_*` critical/high 判定（含 `new` 目标侧）都会形成 `PLAN_RELATION_<phase>_<relation>_<code>` 形式的 blocking 阻塞项，使 `safe_to_execute=false`；阻塞项携带与审计报告一致的 `relation`、`phase`、`relation_code`、`count` 和子行 ID 证据。同一子行、父行与两个拓扑下，`local_join` 可能阻断迁移，而 `replicated_parent` 在复制证据齐全时允许计划继续。
+
+关联判定按 `(relation, child_row_id)` 稳定排序，并对相同输入幂等；同一父行被多个子行引用时结果不随输入行序变化。
+
+---
+
+## 8. 校验错误码
 
 一次校验会收集尽可能多的问题，按 `(code, location, message)` 排序。返回对象包含 `valid`、`fingerprint`、`issue_count` 和 `issues[]`；每个 issue 有 `code`、`message`、`location`、`details`。
 
@@ -206,12 +272,15 @@ SHA-256(UTF-8(normalized composite key))
 | `CFG_LIST_DUPLICATE` | 规范化后 list 键重复 |
 | `CFG_NULL_POLICY` | null 策略不是 `error`、`route_default`、`drop` |
 | `CFG_DEFAULT_MISSING` | `null_policy=route_default` 但没有合法默认分片 |
+| `CFG_RELATION_INVALID` | `relations` 条目结构错误、`mode` 非 `local_join`/`replicated_parent`、`parent_key`/`child_key` 非法、父表与子表相同 |
+| `CFG_RELATION_UNKNOWN_TABLE` | 关联引用了未在 `tables` 中声明的表 |
+| `CFG_RELATION_DUPLICATE` | 同一拓扑内关联名称重复 |
 
 配置指纹是原始 JSON 对象经排序键、紧凑分隔符序列化后的 SHA-256。改变字段顺序不会改变指纹；改变任意值会改变指纹。指纹在报告和 run_id 中使用。
 
 ---
 
-## 8. 路由期数据错误
+## 9. 路由期数据错误
 
 配置合法后，逐行路由仍可能产生运行期错误：
 

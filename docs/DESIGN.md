@@ -121,6 +121,8 @@ manifest 校验会识别：缺失 manifest、解析失败、身份不匹配、�
 
 发现项按 `(severity, table, code, shard, row_id, finding_id)` 稳定排序；`finding_id` 由异常字段的 SHA-256 派生，重复运行不变。任一 critical/high 发现会让审计状态为 `fail`，并成为重分片计划的阻塞项。
 
+声明了父/子关联的工作区会额外追加一组 `RELATION_*` 发现（见第 6 节）。这些发现同样参与 `fail` 判定与阻塞项；未声明关联时不会产生，报告与旧版本逐字节一致。
+
 ---
 
 ## 6. 重分片 dry-run
@@ -128,9 +130,23 @@ manifest 校验会识别：缺失 manifest、解析失败、身份不匹配、�
 - 对每条逻辑行分别计算旧拓扑目标与新拓扑目标。
 - 仅当两个目标不同且均未 drop 时，计入移动矩阵 `(table, from_shard, to_shard)`。
 - 移动矩阵按 table/from/to 排序；批次按 cell 顺序每 80 行切分，批次号从 `batch-001` 开始。
-- 阻塞项来自：未修复的 critical/high 审计发现；目标拓扑缺表；分片键变更；路由错误。router 族变化标记为 review。
+- 阻塞项来自：未修复的 critical/high 审计发现；目标拓扑缺表；分片键变更；路由错误；以及声明式父子关联的阻断判定。router 族变化标记为 review。
 - 回滚清单固定为 7 步，强调先冻结写入、快照 manifest/校验和、shadow copy、重新审计、双读验证、失败恢复旧拓扑、解冻并归档。
 - `safe_to_execute` 只表示静态检查没有 blocking 项；工具自身不会执行任何移动。
+
+### 父/子关联核验
+
+实现：`shardroute/relations.py`，由 `audit.run_audit` 与 `planner.build_plan` 共用同一份判定结果。
+
+单表审计只回答“每行按自己的拓扑落在哪个分片”，不能推出“一条子行能否在本地关联到父行”。父表与子表各自按自己的键落位后，本地关联可能仍拿不到父行。声明式 `relations` 契约补上这一层：
+
+- 对每条被声明的关联，按 `(relation, child_row_id)` 稳定排序逐条判定，输出 `old` 与 `new`（目标拓扑）两份结论，包含结构化证据：子/父逻辑行 ID、规范化引用值、子行物理分片、父行物理分片、父行业务字段指纹、副本清单及其 manifest 证据。
+- **引用可用性优先**：引用值缺失、父行在逻辑快照中不存在、父标识不唯一（多行共享同一 `parent_key`）都直接阻断，不进入“可用”分支。父行自身没有可用标识记为 `RELATION_PARENT_KEY_MISSING`。
+- **`local_join`**：以物理落位判定。持有子行的每个分片都必须有内容一致（`row_id` 相同且业务字段指纹相同）的父行副本；目标拓扑必须把父、子路由到同一分片，否则 `RELATION_TARGET_SPLIT`。
+- **`replicated_parent`**：允许父行在**每个有引用子行的分片**保有一份副本。每份副本都核对业务字段指纹（排除 `row_id`）、`row_id` 身份，并要求其物理文件在分片 manifest 中有匹配的 `name`/`sha256`/`rows` 证据。同名但内容不同、且 `row_id` 相同的父行记为 `RELATION_PARENT_REPLICA_DRIFT`；`row_id` 不同的同键父行视为另一实体，记为 `RELATION_PARENT_CONFLICT`，两者都不会被当作同一父行。
+- **目标迁移**：`replicated_parent` 下若目标拓扑把子行移到一个没有父副本的分片，记 `RELATION_TARGET_PARENT_MISSING`；若该分片只有内容漂移的副本，记 `RELATION_TARGET_PARENT_DRIFT`。因此同一个子行、父行与两个拓扑，`local_join` 会阻断迁移，而 `replicated_parent` 在复制证据齐全时允许计划继续。
+- 所有 `RELATION_*` critical/high 判定都会进入审计 `findings`，并由 `_relation_blockers` 转成 `PLAN_RELATION_<phase>_<relation>_<code>` blocking 阻塞项，携带与报告一致的 `relation`/`phase`/`relation_code`/`count`/子行证据，使 `safe_to_execute=false`。`replicated_parent` 不因错位而自动放行；它只在有内容一致副本且有 manifest 证据时才通过。
+- 未声明 `relations` 的工作区完全保持旧行为：`evaluate_relations` 返回 `None`，审计/计划/报告不出现 `relations` 字段。
 
 ---
 

@@ -1,0 +1,82 @@
+{
+  "description": "Synthetic parent/child relation fixture; not connected to any datastore.",
+  "generated_at": "2026-01-02T03:04:05Z",
+  "relations": [
+    {
+      "child_key": "account_ref",
+      "child_table": "orders",
+      "mode": "local_join",
+      "name": "orders_accounts",
+      "parent_key": "account_code",
+      "parent_table": "accounts"
+    },
+    {
+      "child_key": "catalog_ref",
+      "child_table": "order_items",
+      "mode": "replicated_parent",
+      "name": "items_catalogs",
+      "parent_key": "catalog_code",
+      "parent_table": "catalogs"
+    }
+  ],
+  "shards": [
+    "shard_a",
+    "shard_b",
+    "shard_c"
+  ],
+  "tables": [
+    {
+      "case_sensitive": true,
+      "default_shard": "shard_c",
+      "key": "home_region",
+      "list_map": {
+        "region_alpha": "shard_a",
+        "region_beta": "shard_a",
+        "region_gamma": "shard_c"
+      },
+      "null_policy": "route_default",
+      "router": "list",
+      "table": "accounts"
+    },
+    {
+      "case_sensitive": true,
+      "default_shard": "shard_c",
+      "key": "region",
+      "list_map": {
+        "region_alpha": "shard_a",
+        "region_beta": "shard_b",
+        "region_gamma": "shard_c"
+      },
+      "null_policy": "route_default",
+      "router": "list",
+      "table": "orders"
+    },
+    {
+      "case_sensitive": true,
+      "default_shard": "shard_c",
+      "key": "catalog_region",
+      "list_map": {
+        "region_alpha": "shard_a",
+        "region_beta": "shard_b",
+        "region_gamma": "shard_c"
+      },
+      "null_policy": "route_default",
+      "router": "list",
+      "table": "catalogs"
+    },
+    {
+      "case_sensitive": true,
+      "default_shard": "shard_c",
+      "key": "region",
+      "list_map": {
+        "region_alpha": "shard_b",
+        "region_beta": "shard_c",
+        "region_gamma": "shard_c"
+      },
+      "null_policy": "route_default",
+      "router": "list",
+      "table": "order_items"
+    }
+  ],
+  "version": 1
+}

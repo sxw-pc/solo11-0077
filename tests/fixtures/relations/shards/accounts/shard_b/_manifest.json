@@ -1,0 +1,14 @@
+{
+  "files": [
+    {
+      "name": "part-000.csv",
+      "rows": 3,
+      "sha256": "1fbd31f6c79348901766d9167ded99879280bc4c9a711a8eecab2618056410e3"
+    }
+  ],
+  "format_version": 1,
+  "generated_at": "2026-01-02T03:04:05Z",
+  "row_count": 3,
+  "shard": "shard_b",
+  "table": "accounts"
+}

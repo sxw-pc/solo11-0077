@@ -1,0 +1,2 @@
+{"catalog_ref": "CAT_GAMMA", "region": "region_gamma", "row_id": "it_drift", "sku": "sku_drift"}
+{"catalog_ref": "CAT_ALPHA", "region": "region_gamma", "row_id": "it_replicated", "sku": "sku_rep"}
