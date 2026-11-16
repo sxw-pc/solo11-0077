@@ -121,6 +121,15 @@ coverage_ratio, trace
 
 `coverage_ratio = len(targeted_shards) / len(all_shards)`，保留四位小数。`trace` 记录路由模式、映射值、区间、比较或错误。
 
+布尔 `where` 查询的 `trace.mode = "boolean"`，额外包含：
+
+- `expression`：规范化后的 AND/OR/NOT 表达式；`null_semantics = three_valued_logic`。
+- `dnf`：DNF 分支数、`branch_budget` 以及预算不足时的 `branch_estimate` 和原因。
+- `branches[]`：每个 DNF 分支的字面量、点路由、区间与规则重叠、空值/null_policy 与 default 分片放宽原因、以及该分支的 `target_shards`。
+- `precision`：`exact_dnf_union`（预算内精确并集）或 `budget_full_scan`（预算不足，未截断分支，保守扫描全部分片）。
+
+`summary` 新增 `not_precise_queries`，统计 `precision.precise=false` 的查询数；这类查询在 Markdown 报告的 “Imprecise queries” 小节列出。台账 `queries` 表保存完整 `result_json`，包含上述全部证据字段。
+
 ---
 
 ## 4. Markdown 报告

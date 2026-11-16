@@ -65,10 +65,10 @@ def _cmd_explain(args: argparse.Namespace) -> int:
     old_path, _ = _topology_paths(args.workspace)
     topology = load_topology(args.config or old_path)
     if args.query:
-        _emit(explain_file(topology, args.query).as_dict())
+        _emit(explain_file(topology, args.query, branch_budget=args.branch_budget).as_dict())
     else:
         paths = sorted((Path(args.workspace) / "queries").glob("*.json"), key=lambda p: p.name)
-        _emit([explain_file(topology, path).as_dict() for path in paths])
+        _emit([explain_file(topology, path, branch_budget=args.branch_budget).as_dict() for path in paths])
     return 0
 
 def _cmd_report(args: argparse.Namespace) -> int:
@@ -116,6 +116,12 @@ def build_parser() -> argparse.ArgumentParser:
     explain.add_argument("--workspace", required=True)
     explain.add_argument("--config", help="override the workspace old topology")
     explain.add_argument("--query", help="query JSON path; omit to explain all workspace queries")
+    explain.add_argument(
+        "--branch-budget",
+        type=int,
+        default=None,
+        help="max DNF branches for exact boolean query solving before a conservative full scan",
+    )
     explain.set_defaults(handler=_cmd_explain)
     report = sub.add_parser("report", help="rebuild reports and ledger for an existing workspace")
     report.add_argument("--workspace", required=True)

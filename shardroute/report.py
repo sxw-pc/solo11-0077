@@ -48,6 +48,11 @@ def build_report(
     run_id = compute_run_id(old, new, logical_fingerprint, physical_fingerprint, seed)
     query_dicts = [item.as_dict() for item in queries]
     pruned = sum(1 for item in query_dicts if item["decision"] == "pruned")
+    not_precise = sum(
+        1
+        for item in query_dicts
+        if item.get("trace", {}).get("precision", {}).get("precise") is False
+    )
     safe = bool(plan.get("safe_to_execute"))
     status = "fail" if audit["status"] == "fail" or not safe else audit["status"]
     report = {
@@ -73,6 +78,7 @@ def build_report(
             "blockers": len(plan["blockers"]),
             "queries": len(query_dicts),
             "pruned_queries": pruned,
+            "not_precise_queries": not_precise,
             "safe_to_execute": safe,
         },
         "audit": audit,
@@ -114,6 +120,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"| Shadow batches | {summary['batches']} |",
         f"| Blockers | {summary['blockers']} |",
         f"| Queries pruned | {summary['pruned_queries']} / {summary['queries']} |",
+        f"| Queries not precisely provable | {summary.get('not_precise_queries', 0)} / {summary['queries']} |",
         f"| Safe to execute | {'yes' if summary['safe_to_execute'] else 'no'} |",
         "",
         "## Audit tables",
@@ -195,6 +202,22 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"| {_cell(query['name'])} | {_cell(query['table'])} | {query['decision']} | "
             f"{_cell(targets)} | {_cell(query['reason'])} |"
         )
+    imprecise = [
+        query["name"]
+        for query in report["queries"]
+        if query.get("trace", {}).get("precision", {}).get("precise") is False
+    ]
+    if imprecise:
+        lines.extend(
+            [
+                "",
+                "Imprecise queries (branch budget exhausted; conservatively scanned every shard, "
+                "no branch was truncated):",
+                "",
+            ]
+        )
+        for name in imprecise:
+            lines.append(f"- {_cell(name)}")
     lines.extend(["", "## Rollback checklist", ""])
     for item in report["plan"]["rollback_checklist"]:
         lines.append(f"{item['order']}. {item['action']} Verification: {item['verification']}")

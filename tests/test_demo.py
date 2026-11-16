@@ -23,7 +23,7 @@ class DemoTests(unittest.TestCase):
             root = Path(temporary) / "demo"
             summary = run_demo(root)
             self.assertEqual(summary["logical_rows"], 400)
-            self.assertEqual(summary["query_count"], 3)
+            self.assertEqual(summary["query_count"], 4)
             self.assertEqual(summary["pruned_queries"], 3)
             self.assertEqual(summary["findings"], 8)
             self.assertFalse(summary["safe_to_execute"])

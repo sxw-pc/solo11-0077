@@ -136,7 +136,14 @@ manifest 校验会识别：缺失 manifest、解析失败、身份不匹配、�
 
 ## 7. 查询裁剪解释
 
-实现：`shardroute/query_explain.py`。支持谓词：`eq`、`in`、`gte`、`gt`、`lte`、`lt`、`ne`、`is_null`、`not_null`。
+实现：`shardroute/query_explain.py`。支持谓词：`eq`、`in`、`not_in`、`gte`、`gt`、`lte`、`lt`、`ne`、`is_null`、`not_null`。
+
+两种输入方言：
+
+- 旧格式 `filters`：扁平原子列表，隐式 AND；保留原有解析、决策和 trace 结构，输出字节级不变。
+- 显式布尔表达式 `where`：`{"and": [...]}`、`{"or": [...]}`、`{"not": <expr>}` 与原子谓词任意嵌套，不能与 `filters` 混用。
+
+显式表达式采用 SQL 三值逻辑（3VL）：字段缺失或为 NULL 时谓词结果为 `unknown`；只有整个表达式为 `true` 的行才会被返回，`unknown` 永远不会被当作 `true`（因此 `col = NULL`、`col IN (..., NULL)` 在未命中其它成员时均不返回行）。NOT 通过德摩根律下推并把原子谓词换成 3VL 逆算子（`eq`↔`ne`、`in`↔`not_in`、`gte`↔`lt`、`is_null`↔`not_null`）。
 
 决策值：
 
@@ -146,11 +153,14 @@ manifest 校验会识别：缺失 manifest、解析失败、身份不匹配、�
 | `not_prunable` | 存在分片键谓词，但无法证明裁剪安全，保守扫描全部 |
 | `full_scan` | 没有分片键谓词，必须扫描全部合法分片 |
 
-- hash：只有所有分片键组件都有等值谓词时才能裁剪；复合键缺组件则不可裁剪。
-- range：等值/In 直接路由；区间谓词按左闭右开区间与配置区间求交；完全覆盖所有分片时降级为 `full_scan`。
-- list：等值/In 通过 `list_map` 映射；未映射值使用默认分片；存在默认分片时保守加入目标集合。
-- null 等值谓词遵循 null 策略；`error` 策略下标记 `not_prunable`。
-- 每个结果包含全部合法分片、目标分片、被裁剪分片、覆盖率、原因和结构化 trace。
+- hash：只有所有分片键组件都有等值/IN 谓词时才能裁剪；复合键缺组件则保留全部分片。组件域取有限等值/IN 点的笛卡尔积，逐组合调用 `Router.explain_route`；空键按 `null_policy` 路由、丢弃或拒绝。
+- range：等值/IN 点直接走 Router，落在规则间隙或规则之外的值由 Router 送进 `range_default`；区间谓词按左闭右开与配置区间求交，并显式判断可行区间是否被规则完全覆盖，未覆盖即加入 default 分片。
+- list：等值/IN 通过 `list_map` 映射；否定/`not_null` 在有正引脚时只过滤有限点集，无正引脚时域无界，必须保留所有映射分片和 default 分片。
+- OR 分支只约束非分片键时，该分支保留全部分片，不能因为另一分支可裁剪就丢掉它；非分片键断言本身永远不会被当作矛盾（NULL 比较和空 IN 这类 3VL 不可满足除外）。
+- 互相矛盾的 AND（区间倒置、`is_null` 与非空谓词冲突、有限点全被排除）可得到空分片集合；trace 标记 `contradiction`。
+- 分支预算 `branch_budget`（默认 64，硬上限 100000）：预算内把表达式展开为 DNF，逐分支求解并取所有可能分片的并集（`precision.mode=exact_dnf_union`）；预算不足时不截断分支，而是保守扫描全部分片并标注 `precision.mode=budget_full_scan`、决策 `not_prunable`。预算足够可少扫分片，预算不足只多扫不漏行。
+- 每个结果包含全部合法分片、目标分片、被裁剪分片、覆盖率、原因和结构化 trace；布尔 trace 含 `expression`、逐 `branches` 证据（每个分支的字面量、点路由、区间/规则重叠、空值与 default 放宽原因）和 `precision`。
+- 工具只做离线解释，不连接、不执行任何数据库查询。
 
 ---
 

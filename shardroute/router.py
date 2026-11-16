@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .canonical import composite_key, normalize_components, normalize_value
@@ -16,10 +17,59 @@ from .models import RouteTrace, TableTopology, Topology
 
 _MISSING = object()
 
+@dataclass(frozen=True)
+class RouteOutcome:
+    """Routing result for one concrete key value, expressed for offline proofs.
+
+    ``shard`` is None when the value is dropped or rejected; ``error`` carries
+    the stable routing error code instead of raising so an explanation can widen
+    its shard set conservatively.
+    """
+
+    shard: str | None
+    rule: str
+    null_action: str
+    dropped: bool = False
+    error: str | None = None
+    trace: RouteTrace | None = None
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "target_shard": self.shard,
+            "rule": self.rule,
+            "null_action": self.null_action,
+            "dropped": self.dropped,
+            "error": self.error,
+        }
+
 class Router:
     """Routes key values against an already validated topology."""
     def __init__(self, topology: Topology) -> None:
         self.topology = topology
+
+    def explain_route(self, table_name: str, value: Any) -> RouteOutcome:
+        """Route one concrete key value without raising.
+
+        This is the single source of truth used by the offline query
+        interpreter: every shard the real router could pick must be visible
+        here, including range/list default fallbacks and null policy handling.
+        """
+        try:
+            trace = self.route(table_name, value)
+        except RoutingError as exc:
+            return RouteOutcome(
+                shard=None,
+                rule="route_error",
+                null_action="reject",
+                error=exc.code,
+            )
+        return RouteOutcome(
+            shard=trace.target_shard,
+            rule=trace.rule,
+            null_action=trace.null_action,
+            dropped=trace.dropped,
+            trace=trace,
+        )
+
     def route_values(self, table_name: str, values: Mapping[str, Any]) -> RouteTrace:
         table = self._table(table_name)
         missing = [field for field in table.key_fields if field not in values]

@@ -49,6 +49,17 @@ QUERIES = [
             {"field": "region", "op": "in", "value": ["region_alpha", "region_gamma"]}
         ],
     },
+    {
+        "name": "events_key_or_actor",
+        "table": "events",
+        "description": "A non-shard-key OR branch cannot prove pruning, so every shard is retained.",
+        "where": {
+            "or": [
+                {"field": "event_day", "op": "eq", "value": "2024-02-15"},
+                {"field": "actor_id", "op": "eq", "value": "actor_demo_001"},
+            ]
+        },
+    },
 ]
 
 def _topology(new: bool) -> dict[str, Any]:
