@@ -13,8 +13,9 @@ from .errors import WORKSPACE_INVALID, ShardRouteError
 from .fixturegen import DEMO_SEED, build_fixtures
 from .ledger import Ledger
 from .planner import build_plan
+from .publish import publish_run
 from .query_explain import explain_file
-from .report import build_report, write_reports
+from .report import build_report
 from .scanner import scan_workspace
 
 SENTINEL = ".shardroute-workspace"
@@ -65,13 +66,13 @@ def run_pipeline(workspace: str | Path, seed: int = DEMO_SEED) -> dict[str, Any]
         plan=plan,
         queries=queries,
     )
-    artifacts = write_reports(report, root)
     ledger = Ledger(root / "ledger.sqlite3")
     ledger.initialize()
     try:
-        ledger.record_run(report, artifacts)
+        publication = publish_run(root, report, ledger)
     finally:
         ledger.close()
+    artifacts = publication["manifest"]["artifacts"]
     return {
         "run_id": report["run_id"],
         "status": report["status"],
@@ -86,6 +87,8 @@ def run_pipeline(workspace: str | Path, seed: int = DEMO_SEED) -> dict[str, Any]
         "pruned_queries": sum(1 for item in queries if item.decision == "pruned"),
         "query_count": len(queries),
         "artifacts": artifacts,
+        "published": publication["published"],
+        "recovery_events": publication["recovery"],
         "ledger": str(root / "ledger.sqlite3"),
     }
 

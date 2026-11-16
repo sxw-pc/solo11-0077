@@ -2,18 +2,55 @@
 
 ## 1. 输出位置与顺序
 
-每次 `demo` 或 `report` 运行会把三份报告写入工作区：
+报告通过可恢复的两阶段发布协议落地。每个 run 拥有不可变的版本目录，上一版 A 的文件在 B 发布前不会被修改或删除：
 
 ```text
-<workspace>/reports/report.json
+<workspace>/reports/current.json                       # 当前版本指针（原子替换）
+<workspace>/reports/report.json                        # 当前版本的稳定入口（与版本目录同字节）
 <workspace>/reports/report.md
 <workspace>/reports/report.html
+<workspace>/reports/runs/<run_id>/report.json          # 不可变版本目录
+<workspace>/reports/runs/<run_id>/report.md
+<workspace>/reports/runs/<run_id>/report.html
+<workspace>/reports/runs/<run_id>/manifest.json        # run_id + 指纹 + 全部产物哈希
+<workspace>/reports/.staging-<run_id>/                 # 暂存目录（一次 rename 原子转正）
+<workspace>/reports/quarantine/                        # 被放弃的未发布版本
 <workspace>/ledger.sqlite3
 ```
 
 三份报告都从同一个内存报告对象渲染。JSON 使用 `sort_keys=True`、两空格缩进、UTF-8、结尾换行；Markdown 的表格按报告数组顺序输出；HTML 只使用内联样式并转义所有文本。报告不包含工作区绝对路径，因此同一 fixture 在不同目录下生成相同字节。
 
-`write_reports` 返回的 artifact 列表按路径排序：
+### 1.1 发布状态机
+
+`publications` 表为每个 run 记录三种状态，且任意时刻最多一个 `current`（部分唯一索引保证）：
+
+| 状态 | 含义 |
+|---|---|
+| `staged` | 文件与台账已提交，但尚未成为当前版本；只读入口不把它当作可执行依据 |
+| `current` | 唯一当前版本，`current.json` 与顶层报告均指向它 |
+| `archived` | 曾经的当前版本，证据完整、仍可查询，但不再是当前预检 |
+
+发布顺序：
+
+1. 渲染到 `reports/.staging-<run_id>/`，再单次原子 `rename` 为 `reports/runs/<run_id>/`，读者永远看不到半写入目录。
+2. 一个 SQLite 事务写入 runs/findings/moves/queries/artifacts 与 `staged` 发布行。
+3. 交叉校验：版本目录文件哈希 == manifest == 台账 artifacts，且 run_id 与 `safe_to_execute` 完全一致。
+4. 原子替换 `reports/current.json` 并刷新顶层三份报告。
+5. 同一事务内把发布行翻转为 `current`，旧 current 变为 `archived`。
+
+### 1.2 三个中断切点与恢复
+
+| 切点 | 磁盘表现 | 台账表现 | 允许的恢复 |
+|---|---|---|---|
+| 1. 部分报告写入 | 残留 `.staging-*` | 无该 run 的发布行 | 只能隔离丢弃并重建，A 保持当前 |
+| 2. 报告全部写完、台账未提交 | `runs/<B>/` 完整 | 无 `staged` 行或行不可校验 | 只能隔离丢弃并重建，A 保持当前 |
+| 3. 文件与台账均已持久化、指针未切换 | `runs/<B>/` 完整 | `staged` 行且全部校验通过 | 前滚成 B，或回退 A 并隔离 B |
+
+切点 1、2 永远不允许发布未校验的 B；只有切点 3 允许前滚。所有恢复决策（`discard` / `roll_forward` / `rollback`，含原因与隔离路径）写入 `recovery_events`，可经 CLI `status` 与 HTTP `GET /api/recovery` 查询。事件以 run_id+类型+决策派生稳定 event_id，重复恢复幂等、不产生重复记录。
+
+`write_reports` 仍保留为直接写顶层 `reports/` 的低层接口（供单元测试使用）；流水线统一走 `shardroute.publish.publish_run`。
+
+`write_reports` 与 manifest 中的 artifact 列表按路径排序：
 
 ```text
 report.html, report.json, report.md
@@ -202,8 +239,37 @@ HTTP 复核台返回页面时额外设置严格 CSP；静态 `report.html` 本�
 
 台账查询结果使用稳定 `ORDER BY`：runs 按 `generated_at DESC, run_id DESC`；findings 按严重度和 finding_id；moves 按表/源/目标；queries 按名称；artifacts 按路径。
 
+### publications
+
+| 列 | 说明 |
+|---|---|
+| `run_id` PK | 对应 runs 表 |
+| `state` | `staged` / `current` / `archived`；部分唯一索引保证至多一个 `current` |
+| `manifest_json` | 与磁盘 `manifest.json` 同内容的规范化 JSON |
+| `created_at` / `updated_at` | 取报告 `generated_at`，保持确定性 |
+
+### recovery_events
+
+| 列 | 说明 |
+|---|---|
+| `event_id` PK | `evt_` 前缀的稳定派生 ID，重复恢复不会重复入账 |
+| `run_id` | 被恢复的 run |
+| `event_type` | `partial_reports` / `ledger_not_committed` / `pointer_not_switched` / `operator_recovery` / `legacy_adoption` |
+| `decision` | `discard` / `roll_forward` / `rollback` |
+| `reason` / `detail_json` | 人类可读依据与结构化细节（含隔离路径、前后 current） |
+| `created_at` | 取报告 `generated_at` |
+
 ---
 
 ## 7. 只读复核台
 
 `serve` 以 `mode=ro` 和 `PRAGMA query_only=ON` 打开 SQLite，只提供 GET/HEAD。JSON API 直接返回上述结构，HTML 页面提供同一数据的只读展示；任何 POST/PUT/PATCH/DELETE 返回 `405`，不存在写入端点。
+
+- `GET /api/current` 返回经 `resolve_current` 校验的当前版本：台账 current 标记、`current.json` 指针、版本目录哈希、顶层报告哈希必须全部指向同一 run_id 且 `safe_to_execute` 一致，任一不符返回 500 而不是拼凑结论。
+- `GET /api/runs` 只返回带发布行的 run，并标注 `publication_state` 与 `is_current`；`staged` run 可作为归档证据查看，但永远不会被标为当前。
+- `GET /api/recovery[?run_id=...]` 返回恢复决策流水。
+- CLI `shardroute status --workspace ...` 输出与 HTTP 相同的当前版本校验结果；`shardroute recover --run-id ... --roll-forward|--rollback` 仅对切点 3 的 `staged` 候选生效，两条路线都写 `recovery_events`。
+
+## 8. 故障注入与可恢复性验证
+
+`scripts/fault_injection_demo.py` 在独立子进程中分别武装三个切点（环境变量 `SHARDROUTE_FAULT`，仅测试用途），模拟真实崩溃后重启流水线或执行恢复命令，并核对报告文件、台账、指针与只读复核页四个面的 run_id 与 `safe_to_execute` 完全一致。对应单元测试位于 `tests/test_publish.py`。

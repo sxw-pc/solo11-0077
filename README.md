@@ -51,9 +51,11 @@ python -m unittest discover -s tests -v
 ├── queries/{orders_by_tenant,events_by_day,profiles_by_region}.json
 ├── shards/<table>/<shard>/part-000.csv
 ├── shards/<table>/<shard>/_manifest.json
-├── reports/report.json
+├── reports/current.json                 # 当前版本指针（原子替换）
+├── reports/report.json                  # 当前版本的稳定入口
 ├── reports/report.md
 ├── reports/report.html
+├── reports/runs/<run_id>/               # 不可变版本目录 + manifest.json
 └── ledger.sqlite3
 ```
 
@@ -83,8 +85,15 @@ python -m shardroute explain --workspace .shardroute-demo
 python -m shardroute explain --workspace .shardroute-demo \
   --query .shardroute-demo/queries/orders_by_tenant.json
 
-# 对已存在的工作区重新生成报告与台账
+# 对已存在的工作区重新生成报告与台账（可恢复的原子发布）
 python -m shardroute report --workspace .shardroute-demo
+
+# 查看经校验的当前版本、发布状态与恢复决策流水
+python -m shardroute status --workspace .shardroute-demo
+
+# 切点 3（文件与台账已持久化、指针未切换）的两条恢复路线
+python -m shardroute recover --workspace .shardroute-demo --run-id <run_id> --roll-forward
+python -m shardroute recover --workspace .shardroute-demo --run-id <run_id> --rollback
 
 # 只读复核台
 python -m shardroute serve --workspace .shardroute-demo \
@@ -107,7 +116,9 @@ python -m shardroute route --config fixtures/config/topology_old.json \
 - **JSON**：机器可读的完整报告，包含配置/逻辑/物理指纹、发现项、移动矩阵、批次、查询解释。
 - **Markdown**：便于评审与粘贴到工单的摘要。
 - **HTML**：单文件、自包含、内联 CSS，无外部脚本、字体、图片或 CDN。
-- **SQLite**：`runs`、`findings`、`moves`、`queries`、`artifacts` 五张表，幂等写入。
+- **SQLite**：`runs`、`findings`、`moves`、`queries`、`artifacts` 五张归档表，加上 `publications`（`staged`/`current`/`archived` 状态机）与 `recovery_events`（恢复决策流水），幂等写入。
+
+发布遵循两阶段提交：报告先原子暂存为不可变版本目录，台账事务写入 `staged` 行并通过文件/manifest/台账三方哈希校验后，才原子切换 `current.json` 并把发布行翻转为 `current`。中断恢复时，未完成校验的新版本会被隔离到 `reports/quarantine/` 且旧版本保持当前；只有全套材料齐备并相互校验的版本才能成为当前预检，不会把 A 的迁移许可与 B 的输入指纹拼成一个 `safe_to_execute` 结论。详见 [docs/REPORT.md](docs/REPORT.md)。
 
 控制台命令输出均为确定性排序的 JSON。退出码约定：`0` 成功，`1` 运行时/数据错误，`2` 配置校验失败。
 
@@ -119,10 +130,12 @@ python -m shardroute route --config fixtures/config/topology_old.json \
 
 | 端点 | 用途 |
 |---|---|
-| `GET /` | 台账中全部 run 的只读概览 |
-| `GET /runs/<run_id>` | 单次 run 的发现项、计划、查询解释 |
-| `GET /api/health` | 健康与只读标记 |
-| `GET /api/runs` | run 列表 JSON |
+| `GET /` | 已发布 run 的只读概览，横幅显示经校验的当前版本 |
+| `GET /runs/<run_id>` | 单次 run 的发现项、计划、查询解释与发布状态 |
+| `GET /api/health` | 健康、只读标记与当前 run_id |
+| `GET /api/current` | 经三方哈希校验的当前版本（失败则报错，绝不混版） |
+| `GET /api/runs` | 已发布 run 列表 JSON，含 `publication_state`/`is_current` |
+| `GET /api/recovery` | 恢复决策流水，可按 `run_id` 过滤 |
 | `GET /api/runs/<run_id>` | run 详情、findings、moves、queries、artifacts |
 | `GET /api/runs/<run_id>/findings` | 可按 `table`、`code`、`severity`、`limit` 过滤 |
 | `GET /api/runs/<run_id>/plan` | dry-run 计划与移动矩阵 |
@@ -158,4 +171,10 @@ python -m shardroute route --config fixtures/config/topology_old.json \
 python -m unittest discover -s tests -v
 ```
 
-测试覆盖规范化、配置错误码、三种路由、扫描与 manifest、异常分类、移动计划、查询裁剪、三种报告、SQLite 幂等、只读 HTTP 服务和完整 demo 的字节级复现。测试只使用临时目录与 `tests/fixtures/` 下的小型 fixture。
+测试覆盖规范化、配置错误码、三种路由、扫描与 manifest、异常分类、移动计划、查询裁剪、三种报告、SQLite 幂等、原子发布与三个中断切点的恢复、只读 HTTP 服务和完整 demo 的字节级复现。测试只使用临时目录与 `tests/fixtures/` 下的小型 fixture。
+
+`scripts/fault_injection_demo.py` 用独立子进程模拟真实崩溃/重启，分别在三个切点注入异常并核对报告、台账、指针、复核页的 run_id 与 `safe_to_execute` 一致：
+
+```bash
+python -I scripts/fault_injection_demo.py
+```

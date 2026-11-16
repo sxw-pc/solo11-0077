@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
 from . import RUN_FORMAT
 from .canonical import sha256_bytes, stable_id
+from .errors import WORKSPACE_INVALID, ShardRouteError
 from .html_report import render_html
 from .models import QueryExplanation, Topology
+
+REPORT_FILES = ("report.html", "report.json", "report.md")
+MANIFEST_NAME = "manifest.json"
+STAGING_PREFIX = ".staging-"
+RUNS_DIRNAME = "runs"
 
 def compute_run_id(
     old: Topology, new: Topology, logical_fingerprint: str, physical_fingerprint: str, seed: int
@@ -215,17 +222,145 @@ def render_markdown(report: dict[str, Any]) -> str:
     )
     return "\n".join(lines)
 
-def write_reports(report: dict[str, Any], workspace: str | Path) -> list[dict[str, Any]]:
-    root = Path(workspace) / "reports"
-    root.mkdir(parents=True, exist_ok=True)
-    payloads = {
+def report_payloads(report: dict[str, Any]) -> dict[str, bytes]:
+    """Render the three deterministic report payloads keyed by file name."""
+    return {
         "report.json": (json.dumps(report, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
         "report.md": render_markdown(report).encode("utf-8"),
         "report.html": render_html(report).encode("utf-8"),
     }
+
+def build_manifest(report: dict[str, Any], artifacts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Bind the run_id, fingerprints and every artifact hash into one manifest."""
+    return {
+        "format": "shardroute-publication/1",
+        "run_id": report["run_id"],
+        "report_format": report["format"],
+        "generated_at": report["generated_at"],
+        "status": report["status"],
+        "safe_to_execute": bool(report["summary"]["safe_to_execute"]),
+        "fingerprints": dict(report["fingerprints"]),
+        "artifacts": sorted(
+            (dict(item) for item in artifacts), key=lambda item: item["path"]
+        ),
+    }
+
+def _write_payload_set(payloads: dict[str, bytes], directory: Path) -> list[dict[str, Any]]:
+    directory.mkdir(parents=True, exist_ok=True)
+    artifacts = []
+    for name in sorted(payloads):
+        data = payloads[name]
+        (directory / name).write_bytes(data)
+        artifacts.append(
+            {"path": f"reports/{name}", "sha256": sha256_bytes(data), "bytes": len(data)}
+        )
+    return artifacts
+
+def stage_run(report: dict[str, Any], workspace: str | Path) -> dict[str, Any]:
+    """Render one run into an immutable version directory.
+
+    Files are first written to a sibling staging directory and then moved
+    with a single atomic ``rename``; readers can therefore never observe a
+    half-written version directory.  Re-staging an identical run is a
+    no-op; re-staging a run id whose bytes differ replaces the directory
+    atomically.
+    """
+    root = Path(workspace) / "reports"
+    run_id = report["run_id"]
+    target = root / RUNS_DIRNAME / run_id
+    staging = root / f"{STAGING_PREFIX}{run_id}"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True, exist_ok=True)
+    payloads = report_payloads(report)
+    artifacts = _write_payload_set(payloads, staging)
+    manifest = build_manifest(report, artifacts)
+    (staging / MANIFEST_NAME).write_bytes(
+        (json.dumps(manifest, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    )
+    if target.exists():
+        shutil.rmtree(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging.rename(target)
+    return {"run_id": run_id, "directory": target, "artifacts": artifacts, "manifest": manifest}
+
+def write_reports(report: dict[str, Any], workspace: str | Path) -> list[dict[str, Any]]:
+    """Write the three reports directly under ``<workspace>/reports``.
+
+    Legacy entry point used by the low-level tests; the publication pipeline
+    uses :func:`stage_run` so versions are isolated and atomically swapped.
+    """
+    root = Path(workspace) / "reports"
+    root.mkdir(parents=True, exist_ok=True)
+    payloads = report_payloads(report)
     artifacts = []
     for name in sorted(payloads):
         data = payloads[name]
         (root / name).write_bytes(data)
         artifacts.append({"path": f"reports/{name}", "sha256": sha256_bytes(data), "bytes": len(data)})
     return artifacts
+
+def run_directory(workspace: str | Path, run_id: str) -> Path:
+    return Path(workspace) / "reports" / RUNS_DIRNAME / run_id
+
+def load_run_report(workspace: str | Path, run_id: str) -> dict[str, Any]:
+    """Read the canonical JSON report stored in a version directory."""
+    path = run_directory(workspace, run_id) / "report.json"
+    if not path.is_file():
+        raise ShardRouteError(WORKSPACE_INVALID, "version report.json is missing", str(path))
+    return json.loads(path.read_text(encoding="utf-8"))
+
+def load_manifest(workspace: str | Path, run_id: str) -> dict[str, Any]:
+    path = run_directory(workspace, run_id) / MANIFEST_NAME
+    if not path.is_file():
+        raise ShardRouteError(WORKSPACE_INVALID, "publication manifest is missing", str(path))
+    return json.loads(path.read_text(encoding="utf-8"))
+
+def verify_run_files(workspace: str | Path, run_id: str) -> dict[str, Any]:
+    """Verify the on-disk version directory and return its parsed manifest.
+
+    Every report file must exist, its bytes must match the manifest hash,
+    ``report.json`` must parse and carry the same run_id, and every
+    artifact recorded in the manifest must be present.  Any mismatch raises
+    :class:`ShardRouteError`; the caller must never promote such a run.
+    """
+    directory = run_directory(workspace, run_id)
+    if not directory.is_dir():
+        raise ShardRouteError(WORKSPACE_INVALID, "run directory is missing", str(directory))
+    manifest = load_manifest(workspace, run_id)
+    if manifest.get("run_id") != run_id:
+        raise ShardRouteError(
+            WORKSPACE_INVALID, "manifest run_id does not match its directory", str(directory)
+        )
+    recorded = {item["path"]: item for item in manifest.get("artifacts", [])}
+    expected_paths = {f"reports/{name}" for name in REPORT_FILES}
+    if set(recorded) != expected_paths:
+        raise ShardRouteError(
+            WORKSPACE_INVALID, "manifest artifact set is incomplete", str(directory),
+            {"expected": sorted(expected_paths), "found": sorted(recorded)},
+        )
+    for relative, item in sorted(recorded.items()):
+        # The manifest stores logical workspace-relative paths; the
+        # authoritative bytes of an unpublished version live inside its own
+        # version directory, not at the top-level report paths.
+        path = directory / Path(relative).name
+        if not path.is_file():
+            raise ShardRouteError(WORKSPACE_INVALID, "reported artifact is missing", str(path))
+        data = path.read_bytes()
+        digest = sha256_bytes(data)
+        if digest != item["sha256"] or len(data) != item["bytes"]:
+            raise ShardRouteError(
+                WORKSPACE_INVALID, "artifact hash or size mismatch", str(path),
+                {"expected_sha256": item["sha256"], "actual_sha256": digest},
+            )
+    report_path = directory / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("run_id") != run_id:
+        raise ShardRouteError(
+            WORKSPACE_INVALID, "report.json run_id does not match the version", str(report_path)
+        )
+    if bool(report["summary"]["safe_to_execute"]) != bool(manifest["safe_to_execute"]):
+        raise ShardRouteError(
+            WORKSPACE_INVALID, "manifest and report disagree on safe_to_execute", str(report_path)
+        )
+    return manifest

@@ -13,6 +13,7 @@ from shardroute.config_validation import validate_document
 from shardroute.ledger import Ledger
 from shardroute.models import LogicalRow, ScanResult, make_finding
 from shardroute.planner import build_plan
+from shardroute.publish import publish_run
 from shardroute.query_explain import explain_query
 from shardroute.report import build_report, write_reports
 
@@ -105,10 +106,9 @@ def test_report(with_finding: bool = True) -> dict[str, Any]:
 
 def write_test_run(root: Path, with_finding: bool = True) -> dict[str, Any]:
     report = test_report(with_finding)
-    artifacts = write_reports(report, root)
     ledger = Ledger(root / "ledger.sqlite3")
     ledger.initialize()
-    ledger.record_run(report, artifacts)
+    publish_run(root, report, ledger)
     ledger.close()
     return report
 

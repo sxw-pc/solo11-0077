@@ -45,31 +45,51 @@ def _shell(title: str, body: str) -> str:
 <title>{_e(title)}</title><style>{STYLE}</style></head><body><main>{body}</main></body></html>"""
 
 
-def render_index(runs: list[dict[str, Any]]) -> str:
+def render_index(runs: list[dict[str, Any]], current: dict[str, Any] | None = None) -> str:
     rows = []
+    current_id = current["run_id"] if current else None
     for run in runs:
+        state = (
+            "current"
+            if run.get("is_current")
+            else run.get("publication_state", "archived")
+        )
         rows.append(
             f"<tr><td><a href=\"/runs/{_e(run['run_id'])}\"><code>{_e(run['run_id'])}</code></a></td>"
-            f"<td>{_tag(run['status'])}</td><td>{_e(run['generated_at'])}</td>"
+            f"<td>{_tag(run['status'])}</td><td><span class=\"tag\">{_e(state)}</span></td>"
+            f"<td>{_e(run['generated_at'])}</td>"
             f"<td>{run['summary'].get('audit_findings', 0)}</td>"
             f"<td>{run['summary'].get('rows_moved', 0)}</td>"
             f"<td><a href=\"/api/runs/{_e(run['run_id'])}\">JSON</a></td></tr>"
         )
     table = (
-        "<div class=\"wrap\"><table><thead><tr><th>Run</th><th>Status</th><th>Generated (UTC)</th>"
-        "<th>Findings</th><th>Rows moved</th><th>API</th></tr></thead><tbody>"
+        "<div class=\"wrap\"><table><thead><tr><th>Run</th><th>Status</th><th>Publication</th>"
+        "<th>Generated (UTC)</th><th>Findings</th><th>Rows moved</th><th>API</th></tr></thead><tbody>"
         + "".join(rows)
         + "</tbody></table></div>"
     )
     if not runs:
         table = "<p class=\"empty\">No runs in the ledger. Run <code>python -m shardroute demo</code> first.</p>"
+    if current is not None:
+        current_notice = (
+            f'<div class="notice">Current executable precheck: <code>{_e(current_id)}</code> · '
+            f"safe_to_execute: <strong>{_e('yes' if current['safe_to_execute'] else 'no')}</strong> · "
+            f"logical fingerprint <code>{_e(current['fingerprints']['logical'][:16])}…</code></div>"
+        )
+    else:
+        current_notice = (
+            '<div class="notice">No verified current version. Recovery is required before '
+            "a precheck can be treated as executable evidence.</div>"
+        )
     body = f"""<h1>ShardRoute review desk</h1>
 <p class="muted">Read-only, loopback-only inspection of archived routing audit runs.</p>
 <span class="tag ok">read only</span> <span class="tag">GET / HEAD</span>
 <div class="notice">This interface never connects to a database, never executes SQL against a datastore,
 and never moves shard files. It only reads the local SQLite ledger.</div>
+{current_notice}
 <h2>Runs</h2>{table}
-<p class="nav"><a href="/api/health">Health</a><a href="/api/runs">Runs API</a></p>
+<p class="nav"><a href="/api/health">Health</a><a href="/api/current">Current API</a>
+<a href="/api/runs">Runs API</a><a href="/api/recovery">Recovery decisions</a></p>
 <p class="muted">Boundary: synthetic fixtures, offline verification, dry-run planning only.</p>"""
     return _shell("ShardRoute review desk", body)
 
@@ -122,7 +142,8 @@ def render_run(
 <a href="/api/runs/{_e(run['run_id'])}/findings">Findings JSON</a>
 <a href="/api/runs/{_e(run['run_id'])}/plan">Plan JSON</a></p>
 <h1>Run <code>{_e(run['run_id'])}</code></h1>
-<p>{_tag(run['status'])} <span class="muted">generated {_e(run['generated_at'])} · seed {_e(run['seed'])}</span></p>
+<p>{_tag(run['status'])} <span class="tag">{_e('current' if run.get('is_current') else run.get('publication_state', 'archived'))}</span>
+<span class="muted">generated {_e(run['generated_at'])} · seed {_e(run['seed'])}</span></p>
 <div class="grid">{stats}</div>
 <h2>Audit by table</h2><div class="wrap"><table><thead><tr><th>Table</th><th>Logical</th>
 <th>Physical</th><th>Findings</th></tr></thead><tbody>{table_rows}</tbody></table></div>

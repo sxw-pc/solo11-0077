@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from . import __version__
 from .errors import SERVER_HOST, WORKSPACE_INVALID, ShardRouteError
 from .ledger import Ledger
+from .publish import list_published_runs, resolve_current
 from .server_ui import render_index, render_run
 
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
@@ -42,8 +43,9 @@ def validate_bind(host: str, port: int) -> None:
 class ShardRouteServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
-    def __init__(self, address: tuple[str, int], ledger_path: Path) -> None:
+    def __init__(self, address: tuple[str, int], ledger_path: Path, workspace: Path) -> None:
         self.ledger_path = ledger_path
+        self.workspace = workspace
         super().__init__(address, ReviewHandler)
 
 class ShardRouteServerV6(ShardRouteServer):
@@ -125,27 +127,66 @@ class ReviewHandler(BaseHTTPRequestHandler):
     def _route(
         self, parts: list[str], query: dict[str, list[str]], ledger: Ledger, head: bool
     ) -> None:
+        workspace = self.server.workspace  # type: ignore[attr-defined]
         if parts == ["favicon.ico"]:
             self._send(204, b"", "image/x-icon", head=head)
             return
         if parts == ["api", "health"]:
-            runs = ledger.list_runs()
+            runs = list_published_runs(ledger)
+            try:
+                current = resolve_current(workspace, ledger)
+                current_run_id = current["run_id"]
+            except ShardRouteError:
+                current_run_id = None
             self._send(
                 200,
-                _json_bytes({"status": "ok", "read_only": True, "version": __version__, "runs": len(runs)}),
+                _json_bytes(
+                    {
+                        "status": "ok",
+                        "read_only": True,
+                        "version": __version__,
+                        "runs": len(runs),
+                        "current_run_id": current_run_id,
+                    }
+                ),
                 "application/json; charset=utf-8",
                 head=head,
             )
             return
         if parts == ["api", "runs"]:
-            self._send(200, _json_bytes(ledger.list_runs()), "application/json; charset=utf-8", head=head)
+            self._send(200, _json_bytes(list_published_runs(ledger)),
+                       "application/json; charset=utf-8", head=head)
+            return
+        if parts == ["api", "current"]:
+            self._send(
+                200, _json_bytes(resolve_current(workspace, ledger)),
+                "application/json; charset=utf-8", head=head,
+            )
+            return
+        if parts == ["api", "recovery"]:
+            run_id = self._first(query, "run_id")
+            self._send(
+                200, _json_bytes(ledger.list_recovery_events(run_id)),
+                "application/json; charset=utf-8", head=head,
+            )
             return
         if not parts:
-            self._send(200, render_index(ledger.list_runs()).encode("utf-8"), "text/html; charset=utf-8", head=head)
+            try:
+                current = resolve_current(workspace, ledger)
+            except ShardRouteError as exc:
+                self._error(500, exc.code, exc.message, head)
+                return
+            self._send(
+                200,
+                render_index(list_published_runs(ledger), current).encode("utf-8"),
+                "text/html; charset=utf-8",
+                head=head,
+            )
             return
         if parts[0] == "runs" and len(parts) == 2 and RUN_ID_RE.match(parts[1]):
             run = ledger.get_run(parts[1])
-            if run is None:
+            publication = ledger.get_publication(parts[1])
+            if run is None or publication is None:
                 self._error(404, "RUN_NOT_FOUND", "run not found", head)
                 return
             findings = ledger.get_findings(
@@ -155,6 +196,9 @@ class ReviewHandler(BaseHTTPRequestHandler):
                 severity=self._first(query, "severity"),
             )[: self._limit(query)]
             run["_artifacts"] = ledger.get_artifacts(run["run_id"])
+            run["publication_state"] = publication["state"]
+            current_id = ledger.get_current_run_id()
+            run["is_current"] = run["run_id"] == current_id
             queries = ledger.get_queries(run["run_id"])
             self._send(200, render_run(run, findings, queries).encode("utf-8"), "text/html; charset=utf-8", head=head)
             return
@@ -166,12 +210,15 @@ class ReviewHandler(BaseHTTPRequestHandler):
         self, run_id: str, tail: list[str], query: dict[str, list[str]], ledger: Ledger, head: bool
     ) -> None:
         run = ledger.get_run(run_id)
-        if run is None:
+        publication = ledger.get_publication(run_id)
+        if run is None or publication is None:
             self._error(404, "RUN_NOT_FOUND", "run not found", head)
             return
         if not tail:
             payload = {
                 **run,
+                "publication_state": publication["state"],
+                "is_current": publication["state"] == "current",
                 "findings": ledger.get_findings(run_id)[: self._limit(query)],
                 "moves": ledger.get_moves(run_id),
                 "queries": ledger.get_queries(run_id),
@@ -206,7 +253,7 @@ def create_server(workspace: str | Path, host: str = "127.0.0.1", port: int = 87
     with Ledger(ledger_path, readonly=True) as ledger:
         ledger.list_runs()
     server_class = ShardRouteServerV6 if ":" in host else ShardRouteServer
-    return server_class((host, port), ledger_path)
+    return server_class((host, port), ledger_path, root)
 
 def serve(workspace: str | Path, host: str = "127.0.0.1", port: int = 8765) -> None:
     server = create_server(workspace, host, port)

@@ -13,7 +13,13 @@ from .audit import run_audit
 from .config import load_topology, validation_report
 from .demo import run_demo, run_pipeline
 from .errors import CLI_USAGE, ConfigValidationError, ShardRouteError
+from .ledger import Ledger
 from .planner import build_plan
+from .publish import (
+    resolve_current,
+    rollback_candidate,
+    roll_forward_candidate,
+)
 from .query_explain import explain_file
 from .router import Router
 from .scanner import scan_workspace
@@ -75,6 +81,39 @@ def _cmd_report(args: argparse.Namespace) -> int:
     _emit(run_pipeline(args.workspace, args.seed))
     return 0
 
+def _cmd_status(args: argparse.Namespace) -> int:
+    root = Path(args.workspace)
+    with Ledger(root / "ledger.sqlite3", readonly=True) as ledger:
+        payload = {
+            "current": resolve_current(root, ledger),
+            "publications": [
+                {
+                    "run_id": item["run_id"],
+                    "state": item["state"],
+                    "updated_at": item["updated_at"],
+                }
+                for item in ledger.list_publications()
+            ],
+            "recovery_events": ledger.list_recovery_events(),
+        }
+    _emit(payload)
+    return 0
+
+def _cmd_recover(args: argparse.Namespace) -> int:
+    root = Path(args.workspace)
+    ledger = Ledger(root / "ledger.sqlite3")
+    ledger.initialize()
+    try:
+        if args.decision == "roll-forward":
+            outcome = roll_forward_candidate(root, ledger, args.run_id)
+        else:
+            outcome = rollback_candidate(root, ledger, args.run_id)
+        current = resolve_current(root, ledger)
+    finally:
+        ledger.close()
+    _emit({"outcome": outcome, "current": current})
+    return 0
+
 def _cmd_demo(args: argparse.Namespace) -> int:
     _emit(run_demo(args.workspace, args.seed))
     return 0
@@ -121,6 +160,26 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--workspace", required=True)
     report.add_argument("--seed", type=int, default=20260102)
     report.set_defaults(handler=_cmd_report)
+    status = sub.add_parser(
+        "status", help="show the verified current precheck and recovery history"
+    )
+    status.add_argument("--workspace", required=True)
+    status.set_defaults(handler=_cmd_status)
+    recover = sub.add_parser(
+        "recover", help="resolve a fully persisted but unpublished candidate run"
+    )
+    recover.add_argument("--workspace", required=True)
+    recover.add_argument("--run-id", required=True)
+    choice = recover.add_mutually_exclusive_group(required=True)
+    choice.add_argument(
+        "--roll-forward", dest="decision", action="store_const", const="roll-forward",
+        help="verify the candidate and make it the current version",
+    )
+    choice.add_argument(
+        "--rollback", dest="decision", action="store_const", const="rollback",
+        help="keep the current version and quarantine the candidate",
+    )
+    recover.set_defaults(handler=_cmd_recover)
     serve = sub.add_parser("serve", help="start the read-only loopback UI")
     serve.add_argument("--workspace", default=".shardroute-demo")
     serve.add_argument("--host", default="127.0.0.1")
