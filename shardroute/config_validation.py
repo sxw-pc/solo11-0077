@@ -7,6 +7,7 @@ from typing import Any
 
 from .canonical import fingerprint, format_utc, normalize_value
 from .errors import (
+    CFG_AMOUNT_CONTRACT,
     CFG_BUCKET_RANGE,
     CFG_DEFAULT_MISSING,
     CFG_KEY_MISSING,
@@ -21,7 +22,17 @@ from .errors import (
     CFG_TABLE_NAME,
     Issue,
 )
-from .models import RangeRule, TableTopology, Topology
+from .models import (
+    AMOUNT_CONTRACTS,
+    AmountContract,
+    DEFAULT_AMOUNT_FIELD,
+    DEFAULT_CHANNEL_FIELD,
+    DEFAULT_REPAIR_BUDGET,
+    DEFAULT_TENANT_FIELD,
+    RangeRule,
+    TableTopology,
+    Topology,
+)
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 NULL_POLICIES = {"error", "route_default", "drop"}
@@ -173,6 +184,62 @@ def _validate_list_map(
             result[normalized] = shard
     return result
 
+def _validate_amount_contracts(raw: Any, location: str, issues: list[Issue]) -> tuple[AmountContract, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not raw:
+        issues.append(_issue(CFG_AMOUNT_CONTRACT, "amount_contracts must be a non-empty list", location))
+        return ()
+    contracts: list[AmountContract] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw):
+        loc = f"{location}[{index}]"
+        if not isinstance(item, dict):
+            issues.append(_issue(CFG_AMOUNT_CONTRACT, "amount contract entry must be an object", loc))
+            continue
+        name = item.get("contract")
+        if not isinstance(name, str) or name not in AMOUNT_CONTRACTS:
+            issues.append(
+                _issue(CFG_AMOUNT_CONTRACT, f"contract must be one of {sorted(AMOUNT_CONTRACTS)}", f"{loc}.contract")
+            )
+            continue
+        if name in seen:
+            issues.append(_issue(CFG_AMOUNT_CONTRACT, f"duplicate amount contract {name!r}", f"{loc}.contract"))
+            continue
+        field_names = {}
+        valid = True
+        for key, default in (
+            ("amount_field", DEFAULT_AMOUNT_FIELD),
+            ("tenant_field", DEFAULT_TENANT_FIELD),
+            ("channel_field", DEFAULT_CHANNEL_FIELD),
+        ):
+            value = item.get(key, default)
+            if not isinstance(value, str) or not value.strip():
+                issues.append(_issue(CFG_AMOUNT_CONTRACT, f"{key} must be a non-empty field name", f"{loc}.{key}"))
+                valid = False
+                continue
+            field_names[key] = value
+        budget = item.get("repair_budget", DEFAULT_REPAIR_BUDGET)
+        if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
+            issues.append(
+                _issue(CFG_AMOUNT_CONTRACT, "repair_budget must be a positive integer", f"{loc}.repair_budget")
+            )
+            valid = False
+        if not valid:
+            continue
+        seen.add(name)
+        contracts.append(
+            AmountContract(
+                contract=name,
+                amount_field=field_names["amount_field"],
+                tenant_field=field_names["tenant_field"],
+                channel_field=field_names["channel_field"],
+                repair_budget=budget,
+            )
+        )
+    return tuple(contracts)
+
+
 def validate_document(raw: Any) -> tuple[Topology | None, list[Issue], str]:
     issues: list[Issue] = []
     fp = fingerprint(raw) if raw is not None else ""
@@ -275,6 +342,9 @@ def validate_document(raw: Any) -> tuple[Topology | None, list[Issue], str]:
             list_map = _validate_list_map(
                 item.get("list_map"), f"{loc}.list_map", known_shards, case_sensitive, issues
             )
+        amount_contracts = _validate_amount_contracts(
+            item.get("amount_contracts"), f"{loc}.amount_contracts", issues
+        )
         tables[table_name] = TableTopology(
             table=table_name,
             router=router,
@@ -286,6 +356,7 @@ def validate_document(raw: Any) -> tuple[Topology | None, list[Issue], str]:
             ranges=ranges,
             list_map=list_map,
             case_sensitive=case_sensitive,
+            amount_contracts=amount_contracts,
         )
     if issues:
         return None, issues, fp

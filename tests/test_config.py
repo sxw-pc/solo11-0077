@@ -92,3 +92,45 @@ class ConfigTests(unittest.TestCase):
             broken = validation_report(path)
             self.assertFalse(broken["valid"])
             self.assertEqual(broken["issues"][0]["code"], "CFG_SCHEMA")
+
+class AmountContractConfigTests(unittest.TestCase):
+    def codes(self, doc):
+        _, issues, _ = validate_document(doc)
+        return {issue.code for issue in issues}
+    def table(self, doc, name):
+        return next(item for item in doc["tables"] if item["table"] == name)
+    def test_valid_contracts_are_loaded(self):
+        doc = base_doc()
+        self.table(doc, "orders")["amount_contracts"] = [
+            {"contract": "row_half_even"},
+            {"contract": "dual_margin", "repair_budget": 250,
+             "amount_field": "amount", "tenant_field": "tenant_id", "channel_field": "channel"},
+        ]
+        topology, issues, _ = validate_document(doc)
+        self.assertFalse(issues)
+        names = [c.contract for c in topology.table("orders").amount_contracts]
+        self.assertEqual(names, ["row_half_even", "dual_margin"])
+        self.assertEqual(topology.table("orders").amount_contracts[1].repair_budget, 250)
+        self.assertIn("amount_contracts", topology.table("orders").as_dict())
+    def test_unknown_contract_duplicate_and_bad_budget(self):
+        doc = base_doc()
+        self.table(doc, "orders")["amount_contracts"] = [{"contract": "magic"}]
+        self.assertIn("CFG_AMOUNT_CONTRACT", self.codes(doc))
+        doc = base_doc()
+        self.table(doc, "orders")["amount_contracts"] = [
+            {"contract": "dual_margin"}, {"contract": "dual_margin"}
+        ]
+        self.assertIn("CFG_AMOUNT_CONTRACT", self.codes(doc))
+        doc = base_doc()
+        self.table(doc, "orders")["amount_contracts"] = [
+            {"contract": "dual_margin", "repair_budget": 0}
+        ]
+        self.assertIn("CFG_AMOUNT_CONTRACT", self.codes(doc))
+        doc = base_doc()
+        self.table(doc, "orders")["amount_contracts"] = []
+        self.assertIn("CFG_AMOUNT_CONTRACT", self.codes(doc))
+        doc = base_doc()
+        self.table(doc, "orders")["amount_contracts"] = [
+            {"contract": "dual_margin", "tenant_field": "  "}
+        ]
+        self.assertIn("CFG_AMOUNT_CONTRACT", self.codes(doc))

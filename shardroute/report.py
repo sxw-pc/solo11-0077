@@ -34,6 +34,46 @@ def _topology_summary(topology: Topology) -> dict[str, Any]:
         "tables": [topology.tables[name].as_dict() for name in topology.table_names()],
     }
 
+def _amount_certificates(audit: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    """Trace scanner lexeme -> contract allowance/margins -> plan gate.
+
+    The certificate fingerprint binds every stage of one run into one
+    verifiable artifact, so a lexical change in the scanner cannot silently
+    alter a verdict downstream.
+    """
+
+    verdicts = audit.get("amount_contracts", [])
+    gate_index: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for gate in plan.get("amount_gates", []):
+        gate_index.setdefault((gate.get("table"), gate.get("contract")), []).append(gate)
+    certificates = []
+    for verdict in verdicts:
+        key = (verdict["table"], verdict["contract"])
+        gates = sorted(gate_index.get(key, []), key=lambda item: item["code"])
+        chain = verdict.get("evidence_chain", {})
+        certificates.append(
+            {
+                "table": verdict["table"],
+                "contract": verdict["contract"],
+                "status": verdict["status"],
+                "fields": verdict["fields"],
+                "eligible_rows": verdict["eligible_rows"],
+                "ineligible_rows": verdict["ineligible_rows"],
+                "scanner_fingerprint": chain.get("scanner_fingerprint", ""),
+                "allowance_fingerprint": chain.get("allowance_fingerprint", ""),
+                "margin_fingerprint": chain.get("margin_fingerprint", ""),
+                "verdict_fingerprint": verdict.get("verdict_fingerprint", ""),
+                "plan_gates": gates,
+                "repair": verdict.get("repair"),
+            }
+        )
+    certificate_fingerprint = stable_id("cert", certificates)
+    return {
+        "certificates": certificates,
+        "certificate_fingerprint": certificate_fingerprint,
+    }
+
+
 def build_report(
     *,
     old: Topology,
@@ -50,6 +90,8 @@ def build_report(
     pruned = sum(1 for item in query_dicts if item["decision"] == "pruned")
     safe = bool(plan.get("safe_to_execute"))
     status = "fail" if audit["status"] == "fail" or not safe else audit["status"]
+    amount_certificates = _amount_certificates(audit, plan)
+    amount_gate_count = len(plan.get("amount_gates", []))
     report = {
         "format": RUN_FORMAT,
         "run_id": run_id,
@@ -66,6 +108,8 @@ def build_report(
         "summary": {
             "audit_findings": audit["summary"]["total_findings"],
             "critical_or_high": audit["summary"]["critical_or_high"],
+            "amount_contracts": len(audit.get("amount_contracts", [])),
+            "amount_gates": amount_gate_count,
             "rows_moved": plan["moved_rows"],
             "rows_unchanged": plan["unchanged_rows"],
             "move_cells": len(plan["move_cells"]),
@@ -78,9 +122,11 @@ def build_report(
         "audit": audit,
         "plan": plan,
         "queries": query_dicts,
+        "amount_certificates": amount_certificates,
         "disclaimer": (
             "Static, offline verification only. No database connection was opened and "
-            "no shard was moved, rewritten, rebalanced or queried."
+            "no shard was moved, rewritten, rebalanced or queried. Amount repair "
+            "witnesses are read-only evidence; no physical file is modified."
         ),
     }
     return report
@@ -149,6 +195,70 @@ def render_markdown(report: dict[str, Any]) -> str:
                 message=_cell(finding["message"]),
             )
         )
+    certificates = report.get("amount_certificates", {}).get("certificates", [])
+    if certificates:
+        lines.extend(
+            [
+                "",
+                "## Amount fidelity certificates",
+                "",
+                "| Table | Contract | Status | Eligible | Ineligible | Plan gate |",
+                "|---|---|---|---:|---:|---|",
+            ]
+        )
+        for cert in certificates:
+            gate_codes = ", ".join(gate["code"] for gate in cert["plan_gates"]) or "none"
+            lines.append(
+                f"| {_cell(cert['table'])} | {_cell(cert['contract'])} | **{_cell(cert['status'])}** | "
+                f"{cert['eligible_rows']} | {cert['ineligible_rows']} | {_cell(gate_codes)} |"
+            )
+        for cert in certificates:
+            lines.extend(
+                [
+                    "",
+                    f"### {cert['contract']} on {cert['table']}",
+                    "",
+                    f"- scanner lexeme fingerprint: `{cert['scanner_fingerprint']}`",
+                    f"- allowed-cent allowance fingerprint: `{cert['allowance_fingerprint']}`",
+                    f"- margin fingerprint: `{cert['margin_fingerprint'] or '-'}`",
+                    f"- verdict fingerprint: `{cert['verdict_fingerprint']}`",
+                ]
+            )
+            repair = cert.get("repair")
+            if repair and repair.get("status") == "witness":
+                lines.append(
+                    f"- minimum-change witness: {repair['changed_rows']} row(s), "
+                    f"minimum proven over {repair['nodes_used']} search nodes "
+                    f"(budget {repair['budget']})"
+                )
+                for change in repair["changes"]:
+                    allowed = ", ".join(str(c) for c in change["allowed_cents"])
+                    lines.append(
+                        f"  - `{change['row_id']}`: {change['from_amount']} -> {change['to_amount']} "
+                        f"(allowed {allowed} cents)"
+                    )
+                for dimension, margin_rows in repair["witness_margins"].items():
+                    for margin in margin_rows:
+                        lines.append(
+                            f"  - witness {dimension} margin {margin['key']}: "
+                            f"{margin['cents']} == required {margin['expected_cents']} cents"
+                        )
+            elif repair and repair.get("status") == "infeasible":
+                evidence = repair["evidence"]
+                lines.append("- repair status: **infeasible**")
+                lines.append(
+                    f"  - partitions agree on grand total: {evidence['partition_totals']['partitions_agree']}"
+                )
+                for violation in evidence["bound_violations"]:
+                    lines.append(
+                        f"  - {violation['dimension']} {violation['key']}: target {violation['target_cents']} "
+                        f"outside reachable [{violation['min_cents']}, {violation['max_cents']}] cents"
+                    )
+            elif repair and repair.get("status") == "budget_exceeded":
+                lines.append(
+                    f"- repair status: **UNKNOWN** (budget {repair['budget']} nodes exceeded; "
+                    f"{repair['nodes_used']} nodes used)"
+                )
     lines.extend(
         [
             "",

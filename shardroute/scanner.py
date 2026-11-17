@@ -80,7 +80,10 @@ def _jsonl_rows(path: Path, source: str, unique: bool) -> list[dict[str, Any]]:
                 if not line.strip():
                     continue
                 try:
-                    raw = json.loads(line)
+                    # parse_float=str keeps the original decimal lexeme so
+                    # money amounts can be re-parsed exactly with Decimal;
+                    # binary float never enters the scan result.
+                    raw = json.loads(line, parse_float=str)
                 except ValueError as exc:
                     raise ScanError(SCAN_JSONL, f"invalid JSONL row: {exc}", f"{source}:{line_no}") from exc
                 if not isinstance(raw, dict):

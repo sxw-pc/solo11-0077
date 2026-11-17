@@ -9,6 +9,40 @@ from .canonical import stable_id
 
 SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
+# The two business-authorizable amount fidelity contracts.
+AMOUNT_CONTRACT_ROW_HALF_EVEN = "row_half_even"
+AMOUNT_CONTRACT_DUAL_MARGIN = "dual_margin"
+AMOUNT_CONTRACTS = (AMOUNT_CONTRACT_ROW_HALF_EVEN, AMOUNT_CONTRACT_DUAL_MARGIN)
+DEFAULT_AMOUNT_FIELD = "amount"
+DEFAULT_TENANT_FIELD = "tenant_id"
+DEFAULT_CHANNEL_FIELD = "channel"
+DEFAULT_REPAIR_BUDGET = 1000
+
+@dataclass(frozen=True)
+class AmountContract:
+    """A declared amount precision contract for one logical table.
+
+    ``row_half_even`` demands every physical row equal the half-to-even
+    cent rounding of its logical amount.  ``dual_margin`` permits the two
+    adjacent cent values per row while forcing both the per-tenant and
+    per-channel physical margin totals to equal the half-to-even rounding
+    of the group's exact logical sum.
+    """
+
+    contract: str
+    amount_field: str = DEFAULT_AMOUNT_FIELD
+    tenant_field: str = DEFAULT_TENANT_FIELD
+    channel_field: str = DEFAULT_CHANNEL_FIELD
+    repair_budget: int = DEFAULT_REPAIR_BUDGET
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "contract": self.contract,
+            "amount_field": self.amount_field,
+            "tenant_field": self.tenant_field,
+            "channel_field": self.channel_field,
+            "repair_budget": self.repair_budget,
+        }
+
 @dataclass(frozen=True)
 class RangeRule:
     lower: str
@@ -27,6 +61,7 @@ class TableTopology:
     ranges: tuple[RangeRule, ...] = ()
     list_map: dict[str, str] = field(default_factory=dict)
     case_sensitive: bool = True
+    amount_contracts: tuple[AmountContract, ...] = ()
     def table_shards(self) -> list[str]:
         """Every shard this table can route to, sorted for deterministic output."""
         targets: set[str] = set()
@@ -54,6 +89,7 @@ class TableTopology:
             ],
             "list_map": dict(sorted(self.list_map.items())),
             "case_sensitive": self.case_sensitive,
+            "amount_contracts": [item.as_dict() for item in self.amount_contracts],
         }
 
 @dataclass(frozen=True)

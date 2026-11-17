@@ -172,3 +172,50 @@ manifest 校验会识别：缺失 manifest、解析失败、身份不匹配、�
 - HTTP 服务只实现 GET/HEAD，所有响应设置 `Cache-Control: no-store`、`nosniff`、`DENY` 和严格 CSP；不加载外部资源、不执行 JavaScript。
 - 路径解析先 URL 解码，拒绝 `..` 与反斜杠；run_id 限定为安全字符集。
 - 不读取任何环境密钥、不包含连接串、不发起外部请求。
+
+---
+
+## 10. 金额内容保真审计（amount fidelity）
+
+落位正确只证明 `row_id -> shard`，不证明物理订单金额忠实于逻辑快照。金额审计是叠加在落位审计之上的只读阶段，仅在拓扑表显式声明 `amount_contracts` 时启用；未声明的表与其他表保持原有审计语义不变。
+
+### 10.1 精确十进制词法
+
+实现：`shardroute/decimal_money.py`、`shardroute/scanner.py`。
+
+- 金额一律保留来源词法：CSV 单元格本就是字符串；JSONL 解析使用 `json.loads(..., parse_float=str)`，JSON 数字以原始十进制文本进入扫描结果，二进制 `float` 不进入任何金额路径。
+- 词法必须匹配 `^[+-]?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$`：拒绝指数计数（`5e-3`）、空白、下划线、`NaN`、`Infinity`、首尾点号；任何拒绝都是显式 finding，不允许 float 转写后判通过。
+- 逻辑金额允许任意小数位，以 `decimal.Decimal`（60 位上下文）精确表示；物理金额最多 2 位小数，超精度以 `AMOUNT_OVER_PRECISION` 拒绝；负金额以 `AMOUNT_NEGATIVE_AMOUNT` 拒绝。
+- 所有比较与合计均在整数分（cent）或精确 `Decimal` 上进行；半偶舍入（banker's rounding，`ROUND_HALF_EVEN`）只作用于精确十进制，不作用于二进制近似值。
+
+### 10.2 落位前置与身份证明
+
+实现：`shardroute/amount_audit.py`。一行必须先通过以下全部条件，才允许进入任何金额合计：
+
+1. 逻辑行可路由且未 drop；物理恰好一个落位且分片等于期望分片（缺失、重复、错位、路由错误的行一律排除并保留原因码）。
+2. `tenant_field`、`channel_field` 在逻辑/物理两侧都存在且表示同一实体（字符串去空白后相等；禁止 float 参与身份证明）。
+3. 两侧金额词法都能精确解析、非负，且物理侧不超精度。
+
+被排除的行不参与合格总额，并使该合同的整体裁定为 `unknown`；金额异常使用独立的 `AMOUNT_*` finding 代码，绝不伪装成 `MISPLACED_ROW` 等路由错误。
+
+### 10.3 两个授权合同
+
+| 合同 | 单行规则 | 交叉边际 |
+|---|---|---|
+| `row_half_even` | 物理 2 位 cent 必须精确等于逻辑金额按半偶规则单独舍入的值 | 无 |
+| `dual_margin` | 每行可在逻辑金额相邻的两个 cent 值（floor/ceil，精确值时退化为单点）中择一 | 每个 `tenant_id` 的物理合计与每个 `channel` 的物理合计，都必须分别等于本组逻辑精确金额之和再半偶舍入的值 |
+
+两个合同独立裁定、独立 finding、独立计划门禁；`dual_margin` 的单行宽松区间不能替代两个交叉边际。仅逐行比较 floor/ceil 会把全零物理误判合格；只按 tenant 贪心补一个 cent 而忽略 channel 维度会违反交叉约束。
+
+### 10.4 只读修复证人与不可行证据
+
+`dual_margin` 失败时，分支限界求解器在显式节点预算（`repair_budget`）内搜索**改动行数最少**的可行 cent 分配：
+
+- 变量按 `row_id` 排序、选项按 cent 升序，结果确定可重放；前向检查用每个后缀分组的可达 `[min, max]` 窗口剪枝。
+- 找到证人：返回每行 `from/to` cent、行身份（tenant/channel）、两个维度的证人和边际总额，并标记 `minimum_proven=true`。证人是只读证据，不写物理文件、不产生迁移动作。
+- 预算耗尽：只能返回 `budget_exceeded`，合同裁定 `unknown` 并产生 `AMOUNT_DUAL_MARGIN_UNPROVEN`，绝不宣称可修复。
+- 穷尽后无解：返回可核验的不可行证据——分组边界违反清单、两个分区的目标总额是否一致、变量顺序与已消耗节点数，配合 `AMOUNT_DUAL_MARGIN_INFEASIBLE`。
+
+### 10.5 同 run 因果链
+
+扫描器金额词法/来源的变化依次改变：允许 cent 区间与两个边际（audit）→ 计划安全结论（planner 的 `amount_gates`）→ 报告证书（report 的 `amount_certificates`）。每个合同 verdict 携带 `scanner_fingerprint`、`allowance_fingerprint`、`margin_fingerprint` 与 `verdict_fingerprint`，使该因果链在同一份 run 证据中可逐环复核。

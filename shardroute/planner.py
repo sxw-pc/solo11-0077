@@ -11,13 +11,97 @@ from .router import Router
 
 MAX_BATCH_ROWS = 80
 
+# Amount fidelity gate codes, kept distinct from placement audit blockers so
+# the two authorization contracts are never conflated with routing errors.
+AMOUNT_GATE_PREFIX = "PLAN_AMOUNT"
+# Amount finding codes.  Contract-specific codes carry their contract in the
+# finding detail; row-level quality codes are contract-independent and gate
+# every contract declared on their table.
+_CONTRACT_SPECIFIC_AMOUNT_CODES = {
+    "AMOUNT_ROW_HALF_EVEN_MISMATCH",
+    "AMOUNT_DUAL_MARGIN_VIOLATION",
+    "AMOUNT_DUAL_MARGIN_INFEASIBLE",
+    "AMOUNT_DUAL_MARGIN_UNPROVEN",
+}
+_QUALITY_AMOUNT_CODES = {
+    "AMOUNT_DECIMAL_INVALID",
+    "AMOUNT_NEGATIVE_AMOUNT",
+    "AMOUNT_OVER_PRECISION",
+    "AMOUNT_FIELD_UNTRUSTED",
+}
+_AMOUNT_FINDING_CODES = _CONTRACT_SPECIFIC_AMOUNT_CODES | _QUALITY_AMOUNT_CODES
+
+# Tables that declare each contract, derived from the audit verdicts.
+def _declared_contracts(audit: Mapping[str, Any]) -> dict[str, list[str]]:
+    declared: dict[str, list[str]] = {}
+    for verdict in audit.get("amount_contracts", []):
+        declared.setdefault(verdict["table"], []).append(verdict["contract"])
+    return declared
+
+def _amount_gates(audit: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Turn amount findings into explicit executable gates per contract."""
+
+    if not audit:
+        return []
+    declared = _declared_contracts(audit)
+    # (table, contract, code) -> count.
+    grouped: Counter[tuple[str, str, str]] = Counter()
+    for finding in audit.get("findings", []):
+        code = finding.get("code", "")
+        if code not in _AMOUNT_FINDING_CODES:
+            continue
+        table = finding.get("table", "")
+        if code in _QUALITY_AMOUNT_CODES:
+            for contract in declared.get(table, []):
+                grouped[(table, contract, code)] += 1
+        else:
+            contract = finding.get("detail", {}).get("contract", "unknown")
+            grouped[(table, contract, code)] += 1
+    gates = [
+        {
+            "code": f"{AMOUNT_GATE_PREFIX}_{code[len('AMOUNT_'):]}",
+            "severity": "blocking",
+            "table": table,
+            "contract": contract,
+            "count": count,
+            "message": (
+                f"{count} {code} finding(s) under {contract}; amount fidelity "
+                "is not certified, blocking execution"
+            ),
+        }
+        for (table, contract, code), count in sorted(grouped.items())
+    ]
+    # Contract-level UNKNOWN verdicts gate even when their only problem was an
+    # exclusion that already raised a finding; this keeps unknowns auditable.
+    for verdict in audit.get("amount_contracts", []):
+        if verdict.get("status") == "unknown":
+            gates.append(
+                {
+                    "code": f"{AMOUNT_GATE_PREFIX}_{verdict['contract'].upper()}_UNKNOWN",
+                    "severity": "blocking",
+                    "table": verdict["table"],
+                    "contract": verdict["contract"],
+                    "count": verdict.get("ineligible_rows", 0),
+                    "message": (
+                        f"{verdict['contract']} verdict is UNKNOWN for {verdict['ineligible_rows']} "
+                        "ineligible row(s); no fidelity certificate can be issued"
+                    ),
+                }
+            )
+    gates.sort(key=lambda item: (item["table"], item["contract"], item["code"]))
+    return gates
+
 def _audit_blockers(audit: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     if not audit:
         return []
     grouped: Counter[tuple[str, str]] = Counter()
     for finding in audit.get("findings", []):
         if finding.get("severity") in {"critical", "high"}:
-            grouped[(finding.get("table", ""), finding.get("code", ""))] += 1
+            code = finding.get("code", "")
+            # Amount findings have their own explicitly separated gate list.
+            if code in _AMOUNT_FINDING_CODES:
+                continue
+            grouped[(finding.get("table", ""), code)] += 1
     return [
         {
             "code": f"PLAN_AUDIT_{code}",
@@ -159,6 +243,7 @@ def build_plan(
         {"table": table, "from_shard": source, "to_shard": target, "row_count": count}
         for (table, source, target), count in sorted(move_counts.items())
     ]
+    amount_gates = _amount_gates(audit)
     blockers = _audit_blockers(audit) + _compatibility_blockers(old, new)
     if route_errors:
         blockers.append(
@@ -188,8 +273,10 @@ def build_plan(
         "move_cells": cells,
         "batches": batches,
         "blockers": blockers,
+        "amount_gates": amount_gates,
         "rollback_checklist": _rollback_checklist(),
-        "safe_to_execute": not any(item["severity"] == "blocking" for item in blockers),
+        "safe_to_execute": not any(item["severity"] == "blocking" for item in blockers)
+        and not any(item["severity"] == "blocking" for item in amount_gates),
         "summary": {
             "tables": dict(sorted(table_totals.items())),
             "moved_by_table": dict(sorted(table_moved.items())),

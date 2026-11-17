@@ -17,7 +17,7 @@ h2{font-size:1.25rem;margin:32px 0 10px;border-bottom:1px solid var(--line);padd
 h3{font-size:1.02rem;margin:22px 0 8px}p{margin:8px 0}.muted{color:var(--muted)}
 .badge{display:inline-block;padding:2px 9px;border-radius:999px;font-weight:700;font-size:.78rem;
 border:1px solid currentColor}.pass,.ok{color:var(--ok)}.fail,.critical,.high{color:var(--bad)}
-.attention,.medium,.warn{color:var(--warn)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+.attention,.medium,.warn{color:var(--warn)}.unknown{color:var(--accent)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
 gap:10px;margin:14px 0}.stat{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px}
 .stat b{display:block;font-size:1.45rem}.stat span{color:var(--muted);font-size:.85rem}
 table{width:100%;border-collapse:collapse;margin:8px 0 18px;font-size:.9rem}
@@ -39,7 +39,8 @@ def _e(value: Any) -> str:
 
 
 def _badge(value: str) -> str:
-    css = value.lower() if value.lower() in {"pass", "fail", "attention", "critical", "high", "medium", "low"} else ""
+    known = {"pass", "fail", "attention", "critical", "high", "medium", "low", "unknown"}
+    css = value.lower() if value.lower() in known else ""
     return f'<span class="badge {css}">{_e(value)}</span>'
 
 
@@ -102,6 +103,63 @@ def render_html(report: dict[str, Any]) -> str:
         f"<pre>{_e(_json(query['trace']))}</pre></details>"
         for query in report["queries"]
     )
+    certificates = report.get("amount_certificates", {}).get("certificates", [])
+    cert_row_html = []
+    for cert in certificates:
+        gate_codes = ", ".join(gate["code"] for gate in cert["plan_gates"]) or "none"
+        cert_row_html.append(
+            "<tr>"
+            f"<td>{_e(cert['table'])}</td><td><code>{_e(cert['contract'])}</code></td>"
+            f"<td>{_badge(cert['status'])}</td><td>{cert['eligible_rows']}</td>"
+            f"<td>{cert['ineligible_rows']}</td>"
+            f"<td><code>{_e(gate_codes)}</code></td>"
+            "</tr>"
+        )
+    cert_rows = "".join(cert_row_html)
+    cert_detail = []
+    for cert in certificates:
+        repair = cert.get("repair") or {}
+        if repair.get("status") == "witness":
+            changes = "".join(
+                f"<li><code>{_e(change['row_id'])}</code>: {_e(change['from_amount'])} &rarr; "
+                f"{_e(change['to_amount'])} (allowed {_e(', '.join(str(c) for c in change['allowed_cents']))} cents)</li>"
+                for change in repair["changes"]
+            ) or '<li class="empty">No row changes.</li>'
+            repair_html = (
+                f"<p>Minimum-change witness: <b>{repair['changed_rows']}</b> row(s), "
+                f"minimum proven over {repair['nodes_used']} nodes (budget {repair['budget']}).</p><ul>{changes}</ul>"
+            )
+        elif repair.get("status") == "infeasible":
+            evidence = repair["evidence"]
+            violations = "".join(
+                f"<li>{_e(item['dimension'])} {_e(item['key'])}: target {item['target_cents']} "
+                f"outside [{item['min_cents']}, {item['max_cents']}] cents</li>"
+                for item in evidence["bound_violations"]
+            )
+            repair_html = (
+                "<p><b>Infeasible.</b> Partition totals agree: "
+                f"{evidence['partition_totals']['partitions_agree']}.</p><ul>{violations or '<li>exhaustive search found no assignment</li>'}</ul>"
+            )
+        elif repair.get("status") == "budget_exceeded":
+            repair_html = (
+                f"<p><b>UNKNOWN.</b> Budget {repair['budget']} nodes exceeded "
+                f"({repair['nodes_used']} used); no repair claim is made.</p>"
+            )
+        else:
+            repair_html = '<p class="muted">No repair evidence required.</p>'
+        cert_detail.append(
+            f"<details><summary>{_e(cert['contract'])} on {_e(cert['table'])} — {_e(cert['status'])}</summary>"
+            f"<pre>{_e(_json({'scanner_fingerprint': cert['scanner_fingerprint'], 'allowance_fingerprint': cert['allowance_fingerprint'], 'margin_fingerprint': cert['margin_fingerprint'], 'verdict_fingerprint': cert['verdict_fingerprint']}))}</pre>"
+            f"{repair_html}</details>"
+        )
+    empty_cert_row = '<tr><td colspan="6" class="empty">No amount contracts declared.</td></tr>'
+    cert_section = (
+        "<section id=\"amounts\"><h2>Amount fidelity certificates</h2>"
+        "<div class=\"wrap\"><table><thead><tr><th>Table</th><th>Contract</th><th>Status</th>"
+        "<th>Eligible rows</th><th>Ineligible rows</th><th>Plan gate</th></tr></thead><tbody>"
+        f"{cert_rows or empty_cert_row}"
+        "</tbody></table></div>" + "".join(cert_detail) + "</section>"
+    )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -114,7 +172,7 @@ def render_html(report: dict[str, Any]) -> str:
 <p class="muted">Offline audit, reshard dry-run and query-pruning explanation · run <code>{_e(report['run_id'])}</code></p>
 <p>{_badge(report['status'])} <span class="muted">generated {_e(report['generated_at'])} · seed {_e(report['seed'])}</span></p>
 <nav class="anchors"><a href="#summary">Summary</a><a href="#findings">Findings</a>
-<a href="#plan">Reshard plan</a><a href="#queries">Queries</a><a href="#rollback">Rollback</a></nav>
+<a href="#amounts">Amounts</a><a href="#plan">Reshard plan</a><a href="#queries">Queries</a><a href="#rollback">Rollback</a></nav>
 </header>
 <section id="summary"><h2>Executive summary</h2>
 <div class="grid">
@@ -138,6 +196,7 @@ def render_html(report: dict[str, Any]) -> str:
 <th>Shard</th><th>row_id</th><th>Message</th></tr></thead><tbody>
 {''.join(find_rows) or '<tr><td colspan="6" class="empty">No findings.</td></tr>'}
 </tbody></table></div></section>
+{cert_section}
 <section id="plan"><h2>Reshard plan (dry run)</h2>
 <p><strong>{plan['moved_rows']}</strong> rows move; <strong>{plan['unchanged_rows']}</strong> stay.
 Safe to execute: <strong>{_e('yes' if plan['safe_to_execute'] else 'no')}</strong>.

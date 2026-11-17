@@ -45,6 +45,7 @@ python -m shardroute validate --config fixtures/config/topology_old.json
 | `null_policy` | 字符串 | 否 | `error`（默认）、`route_default`、`drop` |
 | `default_shard` | 字符串或 null | 否 | 必须引用 `shards` 中的分片 |
 | `case_sensitive` | 布尔值 | 否 | 默认 `true`；`false` 时键值做 `casefold()` |
+| `amount_contracts` | 对象数组 | 否 | 金额保真合同声明，见第 9 节；缺省或为空表示该表不做金额审计 |
 
 约束：
 
@@ -206,6 +207,7 @@ SHA-256(UTF-8(normalized composite key))
 | `CFG_LIST_DUPLICATE` | 规范化后 list 键重复 |
 | `CFG_NULL_POLICY` | null 策略不是 `error`、`route_default`、`drop` |
 | `CFG_DEFAULT_MISSING` | `null_policy=route_default` 但没有合法默认分片 |
+| `CFG_AMOUNT_CONTRACT` | 表级 `amount_contracts` 结构非法：合同名未知/重复、字段名空白、`repair_budget` 非正整数 |
 
 配置指纹是原始 JSON 对象经排序键、紧凑分隔符序列化后的 SHA-256。改变字段顺序不会改变指纹；改变任意值会改变指纹。指纹在报告和 run_id 中使用。
 
@@ -226,3 +228,29 @@ SHA-256(UTF-8(normalized composite key))
 输入扫描错误使用 `SCAN_IO`、`SCAN_CSV`、`SCAN_JSONL`、`SCAN_ROW_ID` 和 `SCAN_DUPLICATE_ID`。JSONL 的每个非空行必须是含 `row_id` 的 JSON 对象；JSON `null` 保留为 null，以便触发 null 策略。
 
 在 `audit` 中这些会记录为 `ROUTE_ERROR` 发现项；在 `plan` 中计入 `route_errors` 并形成 blocking 阻塞项。
+
+
+---
+
+## 9. 金额保真合同 `amount_contracts`
+
+表级可选数组，每个对象声明一个业务授权的金额精度合同。缺省（不提供该字段）时该表只做原有落位/manifest 审计，行为完全不变。数组非空时每项 schema：
+
+| 字段 | 类型 | 必填 | 缺省 | 说明 |
+|---|---|---|---|---|
+| `contract` | 字符串 | 是 | — | `row_half_even` 或 `dual_margin`；同一表内不可重复 |
+| `amount_field` | 字符串 | 否 | `amount` | 金额字段名，逻辑/物理两侧同名 |
+| `tenant_field` | 字符串 | 否 | `tenant_id` | 租户边际分组字段 |
+| `channel_field` | 字符串 | 否 | `channel` | 渠道边际分组字段 |
+| `repair_budget` | 正整数 | 否 | `1000` | `dual_margin` 修复证人搜索的节点预算；超出只能给 UNKNOWN |
+
+示例：
+
+```json
+"amount_contracts": [
+  {"contract": "row_half_even"},
+  {"contract": "dual_margin", "repair_budget": 2000}
+]
+```
+
+合同语义、精确十进制口径、UNKNOWN/拒绝规则与修复证人格式见 `docs/DESIGN.md` 第 10 节。任何结构问题集中报 `CFG_AMOUNT_CONTRACT`，位置定位到 `tables[i].amount_contracts[j]`。

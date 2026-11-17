@@ -61,11 +61,12 @@ report.html, report.json, report.md
 | `status` | 字符串 | `pass`、`attention`、`fail` |
 | `fingerprints` | 对象 | `topology_old`、`topology_new`、`logical`、`physical` |
 | `topologies` | 对象 | `old` / `new` 的版本、时间、描述、指纹、分片与表摘要 |
-| `summary` | 对象 | 发现数、移动数、批次、阻塞、查询裁剪数、是否可安全执行 |
+| `summary` | 对象 | 发现数、移动数、批次、阻塞、金额合同数与金额门禁数、查询裁剪数、是否可安全执行 |
 | `audit` | 对象 | 审计状态、汇总、按表统计与发现数组 |
 | `plan` | 对象 | 移动矩阵、批次、阻塞项、回滚清单 |
 | `queries` | 数组 | 查询裁剪解释 |
-| `disclaimer` | 字符串 | 静态离线、不连接数据库、不移动数据的声明 |
+| `amount_certificates` | 对象 | 金额保真合同裁定、因果指纹与只读修复证人；无合同时证书数组为空 |
+| `disclaimer` | 字符串 | 静态离线、不连接数据库、不移动数据、不修改物理金额的声明 |
 
 状态规则：审计存在 critical/high 发现，或计划存在 blocking 阻塞项，则 `fail`；否则审计为 `attention` 时保持 `attention`；全干净为 `pass`。
 
@@ -207,3 +208,38 @@ HTTP 复核台返回页面时额外设置严格 CSP；静态 `report.html` 本�
 ## 7. 只读复核台
 
 `serve` 以 `mode=ro` 和 `PRAGMA query_only=ON` 打开 SQLite，只提供 GET/HEAD。JSON API 直接返回上述结构，HTML 页面提供同一数据的只读展示；任何 POST/PUT/PATCH/DELETE 返回 `405`，不存在写入端点。
+
+
+### amount_certificates 与金额门禁
+
+仅当拓扑表声明 `amount_contracts` 时非空。`audit.amount_contracts[]` 是每个表/合同的完整裁定，`plan.amount_gates[]` 是与之分离的可执行门禁，`report.amount_certificates.certificates[]` 把两者连同因果指纹装订成证书：
+
+```text
+audit.amount_contracts[]:
+  contract, table, fields{amount_field,tenant_field,channel_field,repair_budget},
+  status: "pass" | "fail" | "unknown",
+  eligible_rows, ineligible_rows,
+  rows[]:           # 每行的资格、排除原因、词法、允许 cent、半偶 cent
+  margins[]:        # dual_margin 的 tenant/channel 边际（逻辑精确和、应有/实际 cent、可达区间）
+  mismatches[]:     # row_half_even 的逐行不符
+  repair: null | {status: "witness", minimum_proven, changed_rows, changes[],
+                  witness_margins{tenant[],channel[]}, nodes_used, budget}
+                | {status: "infeasible", evidence{bound_violations, partition_totals,
+                  exhausted_search, replay}}
+                | {status: "budget_exceeded", nodes_used, budget, message}
+  evidence_chain: {scanner{tokens,fingerprint}, scanner_fingerprint,
+                   allowance_fingerprint, margin_fingerprint}
+  verdict_fingerprint
+
+plan.amount_gates[]:   # 独立于 blockers，绝不混入路由 finding 代码
+  code: "PLAN_AMOUNT_<CODE>" | "PLAN_AMOUNT_<CONTRACT>_UNKNOWN",
+  severity: "blocking", table, contract, count, message
+
+report.amount_certificates:
+  certificates[]: {table, contract, status, fields, eligible_rows, ineligible_rows,
+                   scanner_fingerprint, allowance_fingerprint, margin_fingerprint,
+                   verdict_fingerprint, plan_gates[], repair}
+  certificate_fingerprint
+```
+
+裁定口径：全部合格且无违反为 `pass`；合格行中存在违反且没有被排除行为 `fail`；存在任何被排除行（缺失/重复/错位、身份不可信、金额不可信）或预算耗尽为 `unknown`。任何 blocking 金额门禁都会使计划 `safe_to_execute=false` 并让报告顶层 `status=fail`。金额 finding 一律使用 `AMOUNT_*` 代码，与 `MISSING_ROW`/`MISPLACED_ROW` 等路由 finding 分离；修复证人仅为只读、可重放证据，不是迁移动作。Markdown 与 HTML 报告各自包含 “Amount fidelity certificates” 章节。

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from typing import Any
 
+from .amount_audit import audit_amount_contracts
 from .errors import ShardRouteError
 from .models import ScanResult, Topology, make_finding
 from .manifest_audit import _audit_manifests
@@ -137,7 +138,12 @@ def _audit_placements(topology: Topology, scan: ScanResult) -> list[Any]:
     return findings
 
 def run_audit(topology: Topology, scan: ScanResult) -> dict[str, Any]:
-    findings = _audit_placements(topology, scan) + _audit_manifests(topology, scan)
+    amount_verdicts, amount_findings = audit_amount_contracts(topology, scan)
+    findings = (
+        _audit_placements(topology, scan)
+        + _audit_manifests(topology, scan)
+        + amount_findings
+    )
     unique = {finding.finding_id: finding for finding in findings}
     ordered = sorted(unique.values(), key=lambda finding: finding.sort_key())
     by_code = Counter(finding.code for finding in ordered)
@@ -166,4 +172,5 @@ def run_audit(topology: Topology, scan: ScanResult) -> dict[str, Any]:
         },
         "tables": by_table,
         "findings": [finding.as_dict() for finding in ordered],
+        "amount_contracts": amount_verdicts,
     }
