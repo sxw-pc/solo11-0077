@@ -123,6 +123,62 @@ manifest 校验会识别：缺失 manifest、解析失败、身份不匹配、�
 
 ---
 
+## 5a. Hash 负载偏斜尾风险诊断
+
+实现：`shardroute/skew.py`，由 `run_audit` 的 `hash_skew_diagnostics` 字段在同一只读链路中产出。它补充而非替代逐行放置审计，不产出 bucket_map、迁移计划或任何执行动作。
+
+### 零假设与适用范围（显式声明）
+
+零假设标签固定为 `independent_canonical_keys_uniform_buckets`：
+
+- 统计单位是**不同规范化键（canonical key）**，不是逻辑行。每条逻辑行经真实 `Router` 轨迹归一化；同一规范化键的全部行必然共桶，合并为一个权重等于其行数的键群。
+- 零假设把每个键群建模为一次独立、对桶均匀的类别抽样；键群整体按 `bucket_map` 落 shard。
+- 该诊断**不声称 SHA-256 输出是真随机**，尾概率也**不是**对抗性选键或未来容量的保证。每份证书都携带这一 `scope_note`。
+
+### 分母与排除合同
+
+分母字段可逐项复核：`logical_rows`、`eligible_hash_rows`（键群权重之和）、`excluded_rows` 与 `exclusions_by_reason`。以下行绝不偷算为独立 hash 键：
+
+| 排除原因 | 含义 |
+|---|---|
+| `null_error` | null 键被 `null_policy=error` 拒绝（路由失败） |
+| `null_drop` | null 键按 drop 策略丢弃 |
+| `null_default` | null 键落 default shard |
+| `route_error` | 其他路由失败 |
+| `non_hash_route` | range/list 路由决策 |
+
+range/list 表本身标记 `applicable=false, reason=router_not_hash`；没有合格键群的 hash 表标记 `no_eligible_hash_groups`。
+
+### 基线概率与事件
+
+- 基线概率严格按 `bucket_map` 的桶占比计算（如 4 桶中 3 桶指向同一 shard 则概率 0.75），不等权时**不**退化为按 shard 数均分。
+- 观测事件固定为：当前 hash 表最大 shard 逻辑行负载 **至少达到观测最大值**（`max_shard_logical_row_load_at_least`），事件定义、各 shard 观测负载与阈值均写入报告。
+- 多个原值规范化成同一键时合并为一个加权键群；一个键承载多行时权重 > 1，整群同落，**不**退化为逐行二项检验。
+
+### 证书路线与三态结论
+
+显著性阈值 `alpha` 可配置（CLI `--alpha`，默认 0.01，要求 `0 < alpha < 1`）。
+
+1. `exact_weighted_enumeration`：对加权键群做精确动态规划，维护各 shard 负载向量的概率质量；支持不等桶权与不等群权。8 个键群各 10 行且 80:0 时，群级尾概率为 `2/2^8 = 0.0078125`；逐行独立模型的 `2/2^80` 是错误证据，永远不会被采用。
+2. `conservative_hoeffding_bound`：仅当精确路线超出算力预算（状态数或总权重上限）时启用，且只在两个等权 shard、等权重键群的窄条件下严格成立，给出双侧 Hoeffding 上界 `2·exp(-2g(c/g-1/2)^2)`。不适用的形状（不等权 shard、不等群权）返回 `unknown` 并给出原因，绝不伪造精确数。
+
+结论三态：
+
+| decision | 条件 |
+|---|---|
+| `significant` | 精确尾概率 ≤ α；或保守上界 ≤ α（上界足以证明显著） |
+| `not_significant` | 精确尾概率 > α（仅精确路线可给此结论） |
+| `unknown` | 精确路线超预算且上界 > α，或上界不适用；不得暗改为通过或异常 |
+
+同一 80:0 事件、α=0.02：精确路线给 `significant`（0.0078125 ≤ 0.02）；Hoeffding 上界 `2e^-4 ≈ 0.03663 > 0.02` 只能给 `unknown`。α=0.005 时精确路线给 `not_significant`。证书类型与结论的差异在 JSON/Markdown/HTML 中显式展示。
+
+### 预算与因果链
+
+- 预算参数 `max_exact_states`、`max_total_weight` 与实际峰值状态数写入证书；超预算时记录 `fallback_reason`，精确值字段为 `null`，不用不可靠近似数伪装精确概率。
+- Router 归一化规则或 `bucket_map` 一旦变化，键群划分与基线概率随之变化，尾概率与显著性结论同步改变。诊断从真实 Router 轨迹重建键群并在输出中保留每群的 bucket、routed shard 与 row_ids，使这条因果链可追踪、可复核。
+
+---
+
 ## 6. 重分片 dry-run
 
 - 对每条逻辑行分别计算旧拓扑目标与新拓扑目标。

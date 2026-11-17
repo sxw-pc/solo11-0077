@@ -83,9 +83,29 @@ tables:
     findings, critical, by_code
 findings[]:
   finding_id, code, severity, table, shard, row_id, message, detail
+hash_skew_diagnostics:
+  <table>:
+    hypothesis: "independent_canonical_keys_uniform_buckets"
+    scope_note, alpha, applicable, reason?
+    denominator:
+      logical_rows, eligible_hash_rows, excluded_rows,
+      exclusions_by_reason, exclusion_contract
+    key_groups:
+      count, total_weight,
+      groups[]: {canonical_key, weight, bucket, routed_shard, row_ids[]}
+    bucket_baseline:
+      buckets, bucket_map, shard_probabilities
+    event:
+      kind, threshold, observed_max_load, observed_max_shard,
+      observed_shard_loads, definition
+    certificate:
+      type: "exact_weighted_enumeration" | "conservative_hoeffding_bound"
+      tail_probability | null, tail_probability_upper_bound | null,
+      decision: "significant" | "not_significant" | "unknown",
+      decision_rule, budget, unknown_reason
 ```
 
-发现数组按严重度、表名、代码、分片、row_id、finding_id 稳定排序。
+发现数组按严重度、表名、代码、分片、row_id、finding_id 稳定排序。`hash_skew_diagnostics` 是零假设 `independent_canonical_keys_uniform_buckets` 下的 hash 负载偏斜尾风险诊断，统计单位为规范化键群而非逻辑行；其口径、排除合同、三态结论与预算退化规则见 `docs/DESIGN.md` 第 5a 节。顶层 `summary` 另含 `skew_significant_tables` 与 `skew_unknown_tables` 两个计数。
 
 ### plan 对象
 
@@ -131,12 +151,13 @@ coverage_ratio, trace
 2. Executive summary 指标表。
 3. Audit tables 按表统计。
 4. Findings 表。
-5. Reshard move matrix 表。
-6. Batch plan 表。
-7. Blockers 列表。
-8. Query pruning 表。
-9. Rollback checklist。
-10. Boundary notice 与复现命令。
+5. Hash load-skew diagnostics（每张表的零假设、分母、键群权重、桶基线概率、事件定义与三态证书；无诊断时整节省略）。
+6. Reshard move matrix 表。
+7. Batch plan 表。
+8. Blockers 列表。
+9. Query pruning 表。
+10. Rollback checklist。
+11. Boundary notice 与复现命令。
 
 单元格中的 `|`、回车和换行会被转义为单行文本；空值显示为 `-`。Markdown 不嵌入 HTML 或脚本。
 
@@ -148,7 +169,7 @@ coverage_ratio, trace
 
 - 只有内联 `<style>`，没有 `<script>`、`<img>`、`<link>`、`<iframe>`、`data:` 或远程 URL。
 - 所有动态文本经 HTML 转义。
-- 固定展示同样的摘要、发现、计划、查询、回滚清单与免责声明。
+- 固定展示同样的摘要、发现、Hash load-skew 诊断（`#skew` 锚点，含逐键群表与证书徽章）、计划、查询、回滚清单与免责声明。
 - 文件字节由同一报告对象确定性生成。
 
 HTTP 复核台返回页面时额外设置严格 CSP；静态 `report.html` 本身也不加载任何外部资源。

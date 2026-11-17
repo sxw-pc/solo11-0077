@@ -48,7 +48,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     topology = load_topology(args.config or old)
     root = Path(args.workspace)
     scan = scan_workspace(root / "logical", root / "shards", topology.table_names())
-    result = run_audit(topology, scan)
+    result = run_audit(topology, scan, alpha=args.alpha)
     _emit(result)
     return 0
 
@@ -57,7 +57,7 @@ def _cmd_plan(args: argparse.Namespace) -> int:
     old, new = load_topology(old_path), load_topology(new_path)
     root = Path(args.workspace)
     scan = scan_workspace(root / "logical", root / "shards", old.table_names())
-    audit = run_audit(old, scan)
+    audit = run_audit(old, scan, alpha=args.alpha)
     _emit(build_plan(old, new, scan.logical_rows, audit))
     return 0
 
@@ -72,7 +72,7 @@ def _cmd_explain(args: argparse.Namespace) -> int:
     return 0
 
 def _cmd_report(args: argparse.Namespace) -> int:
-    _emit(run_pipeline(args.workspace, args.seed))
+    _emit(run_pipeline(args.workspace, args.seed, alpha=args.alpha))
     return 0
 
 def _cmd_demo(args: argparse.Namespace) -> int:
@@ -108,9 +108,21 @@ def build_parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", help="compare logical rows with a physical shard tree")
     audit.add_argument("--workspace", required=True)
     audit.add_argument("--config", help="override the workspace old topology")
+    audit.add_argument(
+        "--alpha",
+        type=float,
+        default=0.01,
+        help="significance threshold for the hash load-skew tail diagnostic (0 < alpha < 1)",
+    )
     audit.set_defaults(handler=_cmd_audit)
     plan = sub.add_parser("plan", help="print a dry-run resharding plan")
     plan.add_argument("--workspace", required=True)
+    plan.add_argument(
+        "--alpha",
+        type=float,
+        default=0.01,
+        help="significance threshold for the hash load-skew tail diagnostic (0 < alpha < 1)",
+    )
     plan.set_defaults(handler=_cmd_plan)
     explain = sub.add_parser("explain", help="explain query shard pruning")
     explain.add_argument("--workspace", required=True)
@@ -120,6 +132,12 @@ def build_parser() -> argparse.ArgumentParser:
     report = sub.add_parser("report", help="rebuild reports and ledger for an existing workspace")
     report.add_argument("--workspace", required=True)
     report.add_argument("--seed", type=int, default=20260102)
+    report.add_argument(
+        "--alpha",
+        type=float,
+        default=0.01,
+        help="significance threshold for the hash load-skew tail diagnostic (0 < alpha < 1)",
+    )
     report.set_defaults(handler=_cmd_report)
     serve = sub.add_parser("serve", help="start the read-only loopback UI")
     serve.add_argument("--workspace", default=".shardroute-demo")

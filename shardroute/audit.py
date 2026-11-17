@@ -9,6 +9,7 @@ from .errors import ShardRouteError
 from .models import ScanResult, Topology, make_finding
 from .manifest_audit import _audit_manifests
 from .router import Router
+from .skew import DEFAULT_ALPHA, diagnose_hash_table
 
 SEVERITY_ORDER = ("critical", "high", "medium", "low", "info")
 
@@ -136,7 +137,40 @@ def _audit_placements(topology: Topology, scan: ScanResult) -> list[Any]:
                 )
     return findings
 
-def run_audit(topology: Topology, scan: ScanResult) -> dict[str, Any]:
+def run_hash_skew_diagnostics(
+    topology: Topology,
+    scan: ScanResult,
+    alpha: float = DEFAULT_ALPHA,
+    **skew_budget: Any,
+) -> dict[str, dict[str, Any]]:
+    """Per-table hash load-skew tail diagnostics, purely read-only.
+
+    Only hash tables carry a full diagnostic; other tables get an explicit
+    not-applicable stub so the evidence chain never silently omits a table.
+    Key groups are rebuilt from logical rows through the same Router used by
+    the placement audit, keeping normalization and bucket_map changes on the
+    causal path into the tail probability and its significance decision.
+    """
+    router = Router(topology)
+    diagnostics: dict[str, dict[str, Any]] = {}
+    for table_name in topology.table_names():
+        table = topology.table(table_name)
+        diagnostics[table_name] = diagnose_hash_table(
+            table,
+            scan.logical_rows.get(table_name, []),
+            router,
+            alpha,
+            **skew_budget,
+        )
+    return diagnostics
+
+
+def run_audit(
+    topology: Topology,
+    scan: ScanResult,
+    alpha: float = DEFAULT_ALPHA,
+    **skew_budget: Any,
+) -> dict[str, Any]:
     findings = _audit_placements(topology, scan) + _audit_manifests(topology, scan)
     unique = {finding.finding_id: finding for finding in findings}
     ordered = sorted(unique.values(), key=lambda finding: finding.sort_key())
@@ -166,4 +200,7 @@ def run_audit(topology: Topology, scan: ScanResult) -> dict[str, Any]:
         },
         "tables": by_table,
         "findings": [finding.as_dict() for finding in ordered],
+        "hash_skew_diagnostics": run_hash_skew_diagnostics(
+            topology, scan, alpha, **skew_budget
+        ),
     }

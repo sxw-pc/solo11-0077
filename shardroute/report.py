@@ -50,6 +50,19 @@ def build_report(
     pruned = sum(1 for item in query_dicts if item["decision"] == "pruned")
     safe = bool(plan.get("safe_to_execute"))
     status = "fail" if audit["status"] == "fail" or not safe else audit["status"]
+    skew = audit.get("hash_skew_diagnostics", {})
+    skew_significant = sum(
+        1
+        for diagnostic in skew.values()
+        if diagnostic.get("applicable")
+        and diagnostic["certificate"]["decision"] == "significant"
+    )
+    skew_unknown = sum(
+        1
+        for diagnostic in skew.values()
+        if diagnostic.get("applicable")
+        and diagnostic["certificate"]["decision"] == "unknown"
+    )
     report = {
         "format": RUN_FORMAT,
         "run_id": run_id,
@@ -74,6 +87,8 @@ def build_report(
             "queries": len(query_dicts),
             "pruned_queries": pruned,
             "safe_to_execute": safe,
+            "skew_significant_tables": skew_significant,
+            "skew_unknown_tables": skew_unknown,
         },
         "audit": audit,
         "plan": plan,
@@ -84,6 +99,76 @@ def build_report(
         ),
     }
     return report
+
+
+def _format_probability(value: Any) -> str:
+    return "-" if value is None else f"{float(value):.6g}"
+
+
+def render_skew_markdown(report: dict[str, Any]) -> list[str]:
+    """Render the hash load-skew diagnostic section, tolerating absent diagnostics."""
+    diagnostics = report.get("audit", {}).get("hash_skew_diagnostics", {})
+    if not diagnostics:
+        return []
+    lines = ["", "## Hash load-skew diagnostics", ""]
+    for table_name in sorted(diagnostics):
+        diagnostic = diagnostics[table_name]
+        lines.append(f"### Table `{_cell(table_name)}`")
+        lines.append("")
+        if not diagnostic.get("applicable"):
+            lines.append(f"- Applicable: no (`{diagnostic.get('reason', 'not_applicable')}`)")
+            lines.append("")
+            continue
+        certificate = diagnostic["certificate"]
+        denominator = diagnostic["denominator"]
+        baseline = diagnostic["bucket_baseline"]["shard_probabilities"]
+        event = diagnostic["event"]
+        lines.extend(
+            [
+                f"- Null hypothesis: `{diagnostic['hypothesis']}`",
+                f"- Significance threshold alpha: `{diagnostic['alpha']}`",
+                "- Denominator (reviewable):",
+                f"  - logical rows: {denominator['logical_rows']}",
+                f"  - eligible hash rows (group total weight): {denominator['eligible_hash_rows']}",
+                f"  - excluded rows: {denominator['excluded_rows']}",
+                f"  - exclusions by reason: {denominator['exclusions_by_reason'] or '{}'}",
+                f"  - {denominator['exclusion_contract']}",
+                f"- Canonical key groups: {diagnostic['key_groups']['count']} "
+                f"(total weight {diagnostic['key_groups']['total_weight']})",
+                "- Baseline shard probabilities from bucket_map "
+                f"({diagnostic['bucket_baseline']['buckets']} buckets): "
+                + ", ".join(
+                    f"{_cell(shard)}={_format_probability(probability)}"
+                    for shard, probability in sorted(baseline.items())
+                ),
+                f"- Observed event: max shard logical-row load >= {event['threshold']} "
+                f"(observed {event['observed_max_load']} on "
+                f"`{event['observed_max_shard']}`; loads {event['observed_shard_loads']})",
+                f"- Certificate type: `{certificate['type']}`",
+            ]
+        )
+        if certificate["tail_probability"] is not None:
+            lines.append(
+                "- Exact group-weighted tail probability: "
+                f"`{_format_probability(certificate['tail_probability'])}`"
+            )
+        if certificate["tail_probability_upper_bound"] is not None:
+            lines.append(
+                "- Conservative tail probability upper bound (not an exact value): "
+                f"`{_format_probability(certificate['tail_probability_upper_bound'])}`"
+            )
+        lines.extend(
+            [
+                f"- Decision: **{certificate['decision'].upper()}** "
+                f"({certificate['decision_rule']})",
+                "- Compute budget:",
+                f"  - {certificate['budget']}",
+            ]
+        )
+        if certificate.get("unknown_reason"):
+            lines.append(f"- UNKNOWN reason: `{certificate['unknown_reason']}`")
+        lines.extend(["", f"> {diagnostic['scope_note']}", ""])
+    return lines
 
 def _cell(value: Any) -> str:
     text = str(value).replace("\r", " ").replace("\n", " ").replace("|", "\\|")
@@ -149,6 +234,7 @@ def render_markdown(report: dict[str, Any]) -> str:
                 message=_cell(finding["message"]),
             )
         )
+    lines.extend(render_skew_markdown(report))
     lines.extend(
         [
             "",

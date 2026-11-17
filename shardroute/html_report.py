@@ -16,8 +16,8 @@ main{max-width:1180px;margin:0 auto;padding:32px 24px 64px}h1{font-size:1.9rem;m
 h2{font-size:1.25rem;margin:32px 0 10px;border-bottom:1px solid var(--line);padding-bottom:6px}
 h3{font-size:1.02rem;margin:22px 0 8px}p{margin:8px 0}.muted{color:var(--muted)}
 .badge{display:inline-block;padding:2px 9px;border-radius:999px;font-weight:700;font-size:.78rem;
-border:1px solid currentColor}.pass,.ok{color:var(--ok)}.fail,.critical,.high{color:var(--bad)}
-.attention,.medium,.warn{color:var(--warn)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+border:1px solid currentColor}.pass,.ok,.not_significant{color:var(--ok)}.fail,.critical,.high,.significant{color:var(--bad)}
+.attention,.medium,.warn,.unknown{color:var(--warn)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
 gap:10px;margin:14px 0}.stat{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px}
 .stat b{display:block;font-size:1.45rem}.stat span{color:var(--muted);font-size:.85rem}
 table{width:100%;border-collapse:collapse;margin:8px 0 18px;font-size:.9rem}
@@ -39,8 +39,104 @@ def _e(value: Any) -> str:
 
 
 def _badge(value: str) -> str:
-    css = value.lower() if value.lower() in {"pass", "fail", "attention", "critical", "high", "medium", "low"} else ""
+    css = value.lower() if value.lower() in {
+        "pass", "fail", "attention", "critical", "high", "medium", "low",
+        "significant", "not_significant", "unknown",
+    } else ""
     return f'<span class="badge {css}">{_e(value)}</span>'
+
+
+def _prob(value: Any) -> str:
+    return "-" if value is None else _e(f"{float(value):.6g}")
+
+
+def render_skew_html(report: dict[str, Any]) -> str:
+    """Hash load-skew certificates as a self-contained HTML section."""
+    diagnostics = report.get("audit", {}).get("hash_skew_diagnostics", {})
+    if not diagnostics:
+        return ""
+    blocks = []
+    for table_name in sorted(diagnostics):
+        diagnostic = diagnostics[table_name]
+        title = f"<h3>Table <code>{_e(table_name)}</code></h3>"
+        if not diagnostic.get("applicable"):
+            blocks.append(
+                f"{title}<p>{_badge('not_applicable')} "
+                f"<span class=\"muted\">{_e(diagnostic.get('reason', 'not_applicable'))}</span></p>"
+            )
+            continue
+        certificate = diagnostic["certificate"]
+        denominator = diagnostic["denominator"]
+        baseline = diagnostic["bucket_baseline"]["shard_probabilities"]
+        event = diagnostic["event"]
+        budget = certificate["budget"]
+        rows = "".join(
+            f"<tr><td><code>{_e(group['canonical_key'])}</code></td>"
+            f"<td>{group['weight']}</td><td>{group['bucket']}</td>"
+            f"<td><code>{_e(group['routed_shard'])}</code></td>"
+            f"<td>{_e(', '.join(group['row_ids']))}</td></tr>"
+            for group in diagnostic["key_groups"]["groups"]
+        )
+        kv = [
+            ("Null hypothesis", diagnostic["hypothesis"]),
+            ("Alpha", diagnostic["alpha"]),
+            (
+                "Denominator",
+                (
+                    f"logical={denominator['logical_rows']}, eligible hash="
+                    f"{denominator['eligible_hash_rows']}, excluded="
+                    f"{denominator['excluded_rows']}, exclusions="
+                    f"{denominator['exclusions_by_reason'] or '{}'}"
+                ),
+            ),
+            ("Exclusion contract", denominator["exclusion_contract"]),
+            (
+                "Baseline shard probabilities",
+                ", ".join(
+                    f"{shard}={float(probability):.6g}"
+                    for shard, probability in sorted(baseline.items())
+                ),
+            ),
+            (
+                "Observed event",
+                (
+                    f"max shard logical-row load >= {event['threshold']} "
+                    f"(observed {event['observed_max_load']} on "
+                    f"{event['observed_max_shard']}; loads {event['observed_shard_loads']})"
+                ),
+            ),
+            ("Certificate type", certificate["type"]),
+            ("Exact tail probability", _prob(certificate["tail_probability"])),
+            (
+                "Conservative upper bound",
+                _prob(certificate["tail_probability_upper_bound"]),
+            ),
+            ("Decision rule", certificate["decision_rule"]),
+            (
+                "Compute budget",
+                (
+                    f"groups={budget['group_count']}, total_weight={budget['total_weight']}, "
+                    f"exact_completed={budget['exact_completed']}, peak_states="
+                    f"{budget['peak_states']}, fallback={budget['fallback_reason']}"
+                ),
+            ),
+            ("UNKNOWN reason", certificate.get("unknown_reason") or "-"),
+        ]
+        blocks.append(
+            f"{title}"
+            f"<p>{_badge(certificate['decision'])}</p>"
+            f"{_kv(kv)}"
+            '<div class="wrap"><table><thead><tr><th>Canonical key</th>'
+            "<th>Weight (rows)</th><th>Bucket</th><th>Routed shard</th>"
+            "<th>Row ids</th></tr></thead><tbody>"
+            f"{rows}</tbody></table></div>"
+            f'<p class="muted">{_e(diagnostic["scope_note"])}</p>'
+        )
+    return (
+        '<section id="skew"><h2>Hash load-skew diagnostics</h2>'
+        + "".join(blocks)
+        + "</section>"
+    )
 
 
 def _kv(items: list[tuple[str, Any]]) -> str:
@@ -102,6 +198,8 @@ def render_html(report: dict[str, Any]) -> str:
         f"<pre>{_e(_json(query['trace']))}</pre></details>"
         for query in report["queries"]
     )
+    skew_html = render_skew_html(report)
+    skew_anchor = '<a href="#skew">Skew diagnostics</a>' if skew_html else ""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -114,7 +212,7 @@ def render_html(report: dict[str, Any]) -> str:
 <p class="muted">Offline audit, reshard dry-run and query-pruning explanation · run <code>{_e(report['run_id'])}</code></p>
 <p>{_badge(report['status'])} <span class="muted">generated {_e(report['generated_at'])} · seed {_e(report['seed'])}</span></p>
 <nav class="anchors"><a href="#summary">Summary</a><a href="#findings">Findings</a>
-<a href="#plan">Reshard plan</a><a href="#queries">Queries</a><a href="#rollback">Rollback</a></nav>
+{skew_anchor}<a href="#plan">Reshard plan</a><a href="#queries">Queries</a><a href="#rollback">Rollback</a></nav>
 </header>
 <section id="summary"><h2>Executive summary</h2>
 <div class="grid">
@@ -138,6 +236,7 @@ def render_html(report: dict[str, Any]) -> str:
 <th>Shard</th><th>row_id</th><th>Message</th></tr></thead><tbody>
 {''.join(find_rows) or '<tr><td colspan="6" class="empty">No findings.</td></tr>'}
 </tbody></table></div></section>
+{skew_html}
 <section id="plan"><h2>Reshard plan (dry run)</h2>
 <p><strong>{plan['moved_rows']}</strong> rows move; <strong>{plan['unchanged_rows']}</strong> stay.
 Safe to execute: <strong>{_e('yes' if plan['safe_to_execute'] else 'no')}</strong>.

@@ -43,7 +43,7 @@ def prepare_workspace(workspace: str | Path) -> Path:
 def _query_files(workspace: Path) -> list[Path]:
     return sorted((workspace / "queries").glob("*.json"), key=lambda path: path.name)
 
-def run_pipeline(workspace: str | Path, seed: int = DEMO_SEED) -> dict[str, Any]:
+def run_pipeline(workspace: str | Path, seed: int = DEMO_SEED, alpha: float = 0.01) -> dict[str, Any]:
     root = Path(workspace)
     required = [root / "config" / "topology_old.json", root / "config" / "topology_new.json"]
     missing = [str(path) for path in required if not path.is_file()]
@@ -52,7 +52,7 @@ def run_pipeline(workspace: str | Path, seed: int = DEMO_SEED) -> dict[str, Any]
     old = load_topology(required[0])
     new = load_topology(required[1])
     scan = scan_workspace(root / "logical", root / "shards", old.table_names())
-    audit = run_audit(old, scan)
+    audit = run_audit(old, scan, alpha=alpha)
     plan = build_plan(old, new, scan.logical_rows, audit)
     queries = [explain_file(old, path) for path in _query_files(root)]
     report = build_report(
