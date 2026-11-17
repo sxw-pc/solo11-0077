@@ -8,6 +8,7 @@ from typing import Any
 
 from . import RUN_FORMAT
 from .canonical import sha256_bytes, stable_id
+from .compat import build_compatibility_certificate
 from .html_report import render_html
 from .models import QueryExplanation, Topology
 
@@ -44,12 +45,18 @@ def build_report(
     audit: dict[str, Any],
     plan: dict[str, Any],
     queries: list[QueryExplanation],
+    certificate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     run_id = compute_run_id(old, new, logical_fingerprint, physical_fingerprint, seed)
     query_dicts = [item.as_dict() for item in queries]
     pruned = sum(1 for item in query_dicts if item["decision"] == "pruned")
     safe = bool(plan.get("safe_to_execute"))
     status = "fail" if audit["status"] == "fail" or not safe else audit["status"]
+    if certificate is None:
+        certificate = plan.get("compatibility_certificate")
+    if certificate is None:
+        certificate = build_compatibility_certificate(old, new)
+    future_allowed = bool(certificate["future_writes_allowed"])
     report = {
         "format": RUN_FORMAT,
         "run_id": run_id,
@@ -74,13 +81,21 @@ def build_report(
             "queries": len(query_dicts),
             "pruned_queries": pruned,
             "safe_to_execute": safe,
+            "compatibility_status": certificate["status"],
+            "future_writes_allowed": future_allowed,
+            "future_write_permission": certificate["permission"],
+            "compatibility_counterexample_tables": len(certificate["summary"]["counterexample_tables"]),
+            "compatibility_unknown_tables": len(certificate["summary"]["unknown_tables"]),
         },
         "audit": audit,
         "plan": plan,
+        "compatibility_certificate": certificate,
         "queries": query_dicts,
         "disclaimer": (
             "Static, offline verification only. No database connection was opened and "
-            "no shard was moved, rewritten, rebalanced or queried."
+            "no shard was moved, rewritten, rebalanced or queried. Current-row migration "
+            "safety (safe_to_execute) and future-key routing compatibility "
+            "(compatibility_certificate) are independent verdicts."
         ),
     }
     return report
@@ -114,7 +129,10 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"| Shadow batches | {summary['batches']} |",
         f"| Blockers | {summary['blockers']} |",
         f"| Queries pruned | {summary['pruned_queries']} / {summary['queries']} |",
-        f"| Safe to execute | {'yes' if summary['safe_to_execute'] else 'no'} |",
+        f"| Safe to execute (current rows) | {'yes' if summary['safe_to_execute'] else 'no'} |",
+        f"| Future-write compatibility | {summary['compatibility_status']} |",
+        f"| Future writes allowed | {'yes' if summary['future_writes_allowed'] else 'no'} |",
+        f"| Future-write permission | {summary['future_write_permission']} |",
         "",
         "## Audit tables",
         "",
@@ -188,6 +206,53 @@ def render_markdown(report: dict[str, Any]) -> str:
             )
     else:
         lines.append("- No blockers. This remains a dry-run plan only.")
+    certificate = report["compatibility_certificate"]
+    lines.extend(
+        [
+            "",
+            "## Future-key compatibility certificate",
+            "",
+            f"- certificate_id: `{certificate['certificate_id']}`",
+            f"- digest: `{certificate['digest']}`",
+            f"- status: **{certificate['status']}**",
+            f"- permission: **{certificate['permission']}**",
+            f"- future_writes_allowed: {'yes' if certificate['future_writes_allowed'] else 'no'}",
+            f"- tables proven equivalent: {certificate['summary']['proven_equivalent']} "
+            f"/ counterexample: {certificate['summary']['counterexample']} "
+            f"/ unknown: {certificate['summary']['unknown']}",
+            "",
+            "> Current-row migration safety and unseen-future-key compatibility are "
+            "independent verdicts. A zero-row move matrix does not by itself prove "
+            "future-key equivalence.",
+            "",
+            "| Table | Router | Status | Permission | Evidence |",
+            "|---|---|---|---|---|",
+        ]
+    )
+    for record in certificate["tables"]:
+        if record["status"] == "counterexample":
+            evidence = f"{len(record['counterexamples'])} replayed witness(es)"
+        elif record["status"] == "unknown":
+            evidence = "; ".join(record.get("unknown_reasons", [])) or "unproven"
+        else:
+            evidence = record.get("proof", {}).get("method", "proof")
+        lines.append(
+            f"| {_cell(record['table'])} | {_cell(record.get('router_old', '-'))} | "
+            f"{record['status']} | {record['permission']} | {_cell(evidence)} |"
+        )
+    for record in certificate["tables"]:
+        if record["status"] != "counterexample":
+            continue
+        lines.extend(["", f"### Counterexamples · {record['table']}", ""])
+        for witness in record["counterexamples"]:
+            lines.append(
+                f"- raw key `{_cell(json.dumps(witness['raw_key'], ensure_ascii=False))}` "
+                f"(normalized `{_cell(witness['normalized_value'])}`): "
+                f"old `{witness['old']['target_shard']}` vs new `{witness['new']['target_shard']}` "
+                f"[reason: {witness['reason']}]"
+            )
+            for step in witness["comparison_trace"]:
+                lines.append(f"  - {step}")
     lines.extend(["", "## Query pruning", "", "| Query | Table | Decision | Target shards | Reason |", "|---|---|---|---|---|"])
     for query in report["queries"]:
         targets = ", ".join(query["targeted_shards"]) or "none"

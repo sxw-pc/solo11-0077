@@ -27,6 +27,32 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 NULL_POLICIES = {"error", "route_default", "drop"}
 ROUTERS = {"hash", "range", "list"}
 
+def routing_contract(table: TableTopology) -> dict[str, Any]:
+    """The routing-relevant subset of a table definition.
+
+    Two topologies with equal contracts route *every* key identically by
+    construction.  Differences here mean compatibility has to be proven per
+    domain (hash residue, range partition or list map) rather than assumed.
+    """
+    contract: dict[str, Any] = {
+        "router": table.router,
+        "key_fields": list(table.key_fields),
+        "case_sensitive": table.case_sensitive,
+        "null_policy": table.null_policy,
+        "default_shard": table.default_shard,
+    }
+    if table.router == "hash":
+        contract["buckets"] = table.buckets
+        contract["bucket_map"] = list(table.bucket_map)
+    elif table.router == "range":
+        contract["ranges"] = [
+            {"lower": rule.lower, "upper": rule.upper, "shard": rule.shard}
+            for rule in table.ranges
+        ]
+    else:
+        contract["list_map"] = dict(sorted(table.list_map.items()))
+    return contract
+
 def _issue(code: str, message: str, location: str, **details: Any) -> Issue:
     return Issue(code, message, location, details)
 

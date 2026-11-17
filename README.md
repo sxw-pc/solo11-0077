@@ -78,6 +78,11 @@ python -m shardroute audit --workspace .shardroute-demo
 # 旧→新拓扑移动矩阵、批次、阻塞项、回滚清单（只读 dry-run）
 python -m shardroute plan --workspace .shardroute-demo
 
+# 未出现键（未来写入）路由兼容证书：稀有 witness、潜在分歧与预算
+python -m shardroute compat --workspace .shardroute-demo
+python -m shardroute compat --old fixtures/config/topology_old.json \
+  --new fixtures/config/topology_new.json --witness-probe-budget 2000
+
 # 解释全部查询样例；也可只解释一个 --query 文件
 python -m shardroute explain --workspace .shardroute-demo
 python -m shardroute explain --workspace .shardroute-demo \
@@ -104,10 +109,12 @@ python -m shardroute route --config fixtures/config/topology_old.json \
 
 每次完整运行会写入：
 
-- **JSON**：机器可读的完整报告，包含配置/逻辑/物理指纹、发现项、移动矩阵、批次、查询解释。
+- **JSON**：机器可读的完整报告，包含配置/逻辑/物理指纹、发现项、移动矩阵、批次、查询解释，以及独立的未来键兼容证书。
 - **Markdown**：便于评审与粘贴到工单的摘要。
 - **HTML**：单文件、自包含、内联 CSS，无外部脚本、字体、图片或 CDN。
 - **SQLite**：`runs`、`findings`、`moves`、`queries`、`artifacts` 五张表，幂等写入。
+
+报告中**当前行迁移安全**（`plan.safe_to_execute`）与**未来写入兼容**（`compatibility_certificate` / `future_writes_allowed`）是两个独立结论：样本零移动只说明当前行不迁移，不代表未来新键仍路由到相同分片。
 
 控制台命令输出均为确定性排序的 JSON。退出码约定：`0` 成功，`1` 运行时/数据错误，`2` 配置校验失败。
 
@@ -135,7 +142,7 @@ python -m shardroute route --config fixtures/config/topology_old.json \
 
 ## 设计边界
 
-**是：** 静态路由复现、逻辑/物理落位审计、manifest 校验、重分片 dry-run、查询裁剪解释、确定性报告、只读本机复核。
+**是：** 静态路由复现、逻辑/物理落位审计、manifest 校验、重分片 dry-run、未来键路由兼容证书、查询裁剪解释、确定性报告、只读本机复核。
 
 **不是：** 数据库中间件、代理或驱动；SQL 执行器；数据迁移/rebalance 工具；采集/RPA/血缘/湖仓/指标口径平台；报表 CRUD 后台或权限系统。
 
@@ -158,4 +165,4 @@ python -m shardroute route --config fixtures/config/topology_old.json \
 python -m unittest discover -s tests -v
 ```
 
-测试覆盖规范化、配置错误码、三种路由、扫描与 manifest、异常分类、移动计划、查询裁剪、三种报告、SQLite 幂等、只读 HTTP 服务和完整 demo 的字节级复现。测试只使用临时目录与 `tests/fixtures/` 下的小型 fixture。
+测试覆盖规范化、配置错误码、三种路由、扫描与 manifest、异常分类、移动计划、未来键兼容证书、查询裁剪、三种报告、SQLite 幂等、只读 HTTP 服务和完整 demo 的字节级复现。测试只使用临时目录与 `tests/fixtures/` 下的小型 fixture。

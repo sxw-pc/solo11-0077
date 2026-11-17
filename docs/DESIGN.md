@@ -130,7 +130,36 @@ manifest 校验会识别：缺失 manifest、解析失败、身份不匹配、�
 - 移动矩阵按 table/from/to 排序；批次按 cell 顺序每 80 行切分，批次号从 `batch-001` 开始。
 - 阻塞项来自：未修复的 critical/high 审计发现；目标拓扑缺表；分片键变更；路由错误。router 族变化标记为 review。
 - 回滚清单固定为 7 步，强调先冻结写入、快照 manifest/校验和、shadow copy、重新审计、双读验证、失败恢复旧拓扑、解冻并归档。
-- `safe_to_execute` 只表示静态检查没有 blocking 项；工具自身不会执行任何移动。
+- `safe_to_execute` 只表示静态检查没有 blocking 项；工具自身不会执行任何移动。它回答的是**当前已存在行**能否安全迁移，**不**等于未来新键兼容。
+
+### 6.1 未来键兼容证书（unseen-key certificate）
+
+实现：`shardroute/compat.py`，`build_plan` 会自动附带 `compatibility_certificate`，也可单独用 `python -m shardroute compat` 生成。它回答的是另一个问题：
+
+> 若未来写入仍沿用旧路由契约，新拓扑是否会把同一个键发到与旧拓扑相同的分片？
+
+**不把 `moved_rows=0` 当作全域等价。** `build_plan` 的 move 矩阵只遍历 `logical_rows` 中已有行；证书独立地在**声明的键域**上证明或反驳等价性。二者在报告中是两个独立结论：
+
+- `safe_to_execute`：当前行的迁移安全性。
+- `compatibility_certificate` / `future_writes_allowed` / `future_write_permission`：未来写入能否切换到新拓扑。
+
+每张表恰好三种状态之一：
+
+| 状态 | 含义 | 许可 |
+|---|---|---|
+| `proven_equivalent` | 在声明键域上穷尽证明旧/新路由函数相等 | `allow_future_writes` |
+| `counterexample` | 找到**真实原始键**，经旧、新 `Router` 双路验证得到不同结果 | `block_future_writes` |
+| `unknown` | 既未证明等价，也无真实反例 | `shadow_observation_only` |
+
+证明方法：
+
+- **hash**：在键字段与规范化契约相同的前提下，对 `lcm(buckets_old, buckets_new)` 个 residue 比较 `int.from_bytes(SHA-256(key)[0:8],"big")` 在两套 `buckets`/`bucket_map` 下的分片分配。**不是**只比较相同下标，因此桶数变化也被正确覆盖。residue 分歧只是**潜在分歧**：只有找到真实原始键并调用旧、新 Router 双路确认后才记为反例；若预算内找不到 witness，则诚实标 `unknown`，不得伪装成已证差异或已证等价。
+- **range**：用两套拓扑全部规范化边界的并集把整个字符串域切成若干区间，逐一比较；覆盖显式规则之外的 gap、`default_shard` 回退和 `ROUTE_NO_MATCH`。
+- **list**：逐一比较两套 `list_map` 键的并集，外加一个未列键类（验证 `default_shard` 回退或 `ROUTE_NO_MATCH`）。
+- **null**：单独比较 `null_policy`（error / route_default / drop）；差异存在时用真实 `None` 键双路验证。
+- **unknown 条件**：键字段变化、大小写/规范化语义不一致、配置无法枚举的非有限逆像（residue 分歧但预算内未找到 witness）、预算耗尽、以及上述需要真实键但无法构造的情形。
+
+证书记录每张表的键域描述、规范化前提、预算与消耗（`proof.domain`/`proof.budget`/`proof.consumed`）、`potential_divergences`、`counterexamples`（含原始键、规范化值、bucket/比较 trace、旧新分片与证书摘要），并有整体 `certificate_id` 与 `digest`。`build_plan` 的 `future_write_blockers` 独立于当前行阻塞项，避免把两种安全性混成一个布尔值。
 
 ---
 

@@ -10,6 +10,7 @@ from typing import Any
 
 from . import __version__
 from .audit import run_audit
+from .compat import build_compatibility_certificate
 from .config import load_topology, validation_report
 from .demo import run_demo, run_pipeline
 from .errors import CLI_USAGE, ConfigValidationError, ShardRouteError
@@ -59,6 +60,27 @@ def _cmd_plan(args: argparse.Namespace) -> int:
     scan = scan_workspace(root / "logical", root / "shards", old.table_names())
     audit = run_audit(old, scan)
     _emit(build_plan(old, new, scan.logical_rows, audit))
+    return 0
+
+def _cmd_compat(args: argparse.Namespace) -> int:
+    if args.workspace:
+        if args.new:
+            raise ShardRouteError(CLI_USAGE, "--new is only valid with --old, not --workspace")
+        old_path, new_path = _topology_paths(args.workspace)
+    else:
+        if not args.new:
+            raise ShardRouteError(CLI_USAGE, "--old requires --new")
+        old_path, new_path = Path(args.old), Path(args.new)
+    old, new = load_topology(old_path), load_topology(new_path)
+    _emit(
+        build_compatibility_certificate(
+            old,
+            new,
+            hash_residue_budget=args.hash_residue_budget,
+            witness_probe_budget=args.witness_probe_budget,
+            max_counterexamples=args.max_counterexamples,
+        )
+    )
     return 0
 
 def _cmd_explain(args: argparse.Namespace) -> int:
@@ -112,6 +134,17 @@ def build_parser() -> argparse.ArgumentParser:
     plan = sub.add_parser("plan", help="print a dry-run resharding plan")
     plan.add_argument("--workspace", required=True)
     plan.set_defaults(handler=_cmd_plan)
+    compat = sub.add_parser(
+        "compat", help="certify unseen future-key routing compatibility (offline, read-only)"
+    )
+    source = compat.add_mutually_exclusive_group(required=True)
+    source.add_argument("--workspace", help="use <workspace>/config/topology_{old,new}.json")
+    source.add_argument("--old", help="old topology JSON path")
+    compat.add_argument("--new", help="new topology JSON path (required with --old)")
+    compat.add_argument("--hash-residue-budget", type=int, default=1_000_000)
+    compat.add_argument("--witness-probe-budget", type=int, default=10_000)
+    compat.add_argument("--max-counterexamples", type=int, default=3)
+    compat.set_defaults(handler=_cmd_compat)
     explain = sub.add_parser("explain", help="explain query shard pruning")
     explain.add_argument("--workspace", required=True)
     explain.add_argument("--config", help="override the workspace old topology")

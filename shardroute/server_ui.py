@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 from typing import Any
 
 STYLE = """
@@ -103,10 +104,34 @@ def render_run(
         f"<li>{_tag(item.get('severity', 'review'))} <code>{_e(item['code'])}</code>: {_e(item['message'])}</li>"
         for item in plan.get("blockers", [])
     ) or "<li class=\"empty\">No blockers.</li>"
+    future_blockers = "".join(
+        f"<li>{_tag(item.get('severity', 'review'))} <code>{_e(item['code'])}</code>: {_e(item['message'])}</li>"
+        for item in plan.get("future_write_blockers", [])
+    ) or "<li class=\"empty\">No future-write blockers.</li>"
+    certificate = plan.get("compatibility_certificate") or {}
+    compat_status = certificate.get("status", "not recorded")
+    future_allowed = plan.get("future_writes_allowed")
+    permission = plan.get("future_write_permission", "not recorded")
     moves = "".join(
         f"<tr><td>{_e(cell['table'])}</td><td><code>{_e(cell['from_shard'])}</code></td>"
         f"<td><code>{_e(cell['to_shard'])}</code></td><td>{cell['row_count']}</td></tr>"
         for cell in plan.get("move_cells", [])
+    )
+    cert_rows = "".join(
+        f"<tr><td>{_e(record['table'])}</td><td>{_tag(record['status'])}</td>"
+        f"<td><code>{_e(record['permission'])}</code></td>"
+        f"<td>{len(record.get('counterexamples', []))}</td>"
+        f"<td>{_e('; '.join(record.get('unknown_reasons', [])) or '-')}</td></tr>"
+        for record in certificate.get("tables", [])
+    )
+    witness_rows = "".join(
+        f"<tr><td>{_e(record['table'])}</td>"
+        f"<td><code>{_e(json.dumps(witness['raw_key'], ensure_ascii=False))}</code></td>"
+        f"<td><code>{_e(witness['old']['target_shard'])}</code></td>"
+        f"<td><code>{_e(witness['new']['target_shard'])}</code></td>"
+        f"<td>{_e(witness['reason'])}</td></tr>"
+        for record in certificate.get("tables", [])
+        for witness in record.get("counterexamples", [])
     )
     query_rows = "".join(
         f"<tr><td>{_e(item['name'])}</td><td>{_e(item['table'])}</td>"
@@ -141,6 +166,21 @@ def render_run(
 <h3>Blockers</h3><ul>{blockers}</ul>
 <h3>Move matrix</h3><div class="wrap"><table><thead><tr><th>Table</th><th>From</th><th>To</th>
 <th>Rows</th></tr></thead><tbody>{moves or '<tr><td colspan="4" class="empty">No moves.</td></tr>'}</tbody></table></div>
+<h3>Future-key compatibility certificate</h3>
+<p>Current rows: safe to execute <strong>{_e('yes' if plan.get('safe_to_execute') else 'no')}</strong>.
+Unseen future keys: status <strong>{_e(compat_status)}</strong>, permission
+<strong><code>{_e(permission)}</code></strong>, writes allowed
+<strong>{_e('yes' if future_allowed else 'no')}</strong>.<br>
+<span class="muted">These are independent verdicts; a zero-row move matrix does not prove future-key equivalence.</span></p>
+<ul>{future_blockers}</ul>
+<div class="wrap"><table><thead><tr><th>Table</th><th>Status</th><th>Permission</th>
+<th>Witnesses</th><th>Unknown reason</th></tr></thead><tbody>
+{cert_rows or '<tr><td colspan="5" class="empty">No certificate recorded in this run.</td></tr>'}
+</tbody></table></div>
+<div class="wrap"><table><thead><tr><th>Table</th><th>Raw key</th><th>Old shard</th>
+<th>New shard</th><th>Reason</th></tr></thead><tbody>
+{witness_rows or '<tr><td colspan="5" class="empty">No replayed counterexamples.</td></tr>'}
+</tbody></table></div>
 <h2>Queries</h2><div class="wrap"><table><thead><tr><th>Name</th><th>Table</th><th>Decision</th>
 <th>Targets</th><th>Reason</th></tr></thead><tbody>{query_rows}</tbody></table></div>
 <h2>Artifacts</h2><ul>{artifacts or '<li class="empty">No files recorded.</li>'}</ul>

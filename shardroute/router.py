@@ -16,6 +16,23 @@ from .models import RouteTrace, TableTopology, Topology
 
 _MISSING = object()
 
+def hash_prefix_integer(normalized: str) -> int:
+    """Return the deterministic SHA-256 prefix integer used for hash routing.
+
+    ``router=hash`` assigns ``int.from_bytes(SHA-256(key)[0:8], "big") % buckets``.
+    Exposing the integer (rather than the bucket) lets compatibility proofs
+    compare two topologies' bucket assignments over the same digest space.
+    """
+    digest = hashlib.sha256(normalized.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big")
+
+def hash_bucket_assignment(
+    buckets: int, bucket_map: tuple[str, ...] | list[str], number: int
+) -> tuple[int, str]:
+    """Map a SHA-prefix integer to ``(bucket, shard)`` for one topology."""
+    bucket = number % buckets
+    return bucket, bucket_map[bucket]
+
 class Router:
     """Routes key values against an already validated topology."""
     def __init__(self, topology: Topology) -> None:
@@ -101,8 +118,7 @@ class Router:
         assert table.buckets is not None
         digest = hashlib.sha256(normalized.encode("utf-8")).digest()
         number = int.from_bytes(digest[:8], "big")
-        bucket = number % table.buckets
-        shard = table.bucket_map[bucket]
+        bucket, shard = hash_bucket_assignment(table.buckets, table.bucket_map, number)
         return RouteTrace(
             table=table.table,
             key_fields=table.key_fields,

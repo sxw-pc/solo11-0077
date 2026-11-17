@@ -54,6 +54,7 @@ def run_pipeline(workspace: str | Path, seed: int = DEMO_SEED) -> dict[str, Any]
     scan = scan_workspace(root / "logical", root / "shards", old.table_names())
     audit = run_audit(old, scan)
     plan = build_plan(old, new, scan.logical_rows, audit)
+    certificate = plan["compatibility_certificate"]
     queries = [explain_file(old, path) for path in _query_files(root)]
     report = build_report(
         old=old,
@@ -64,6 +65,7 @@ def run_pipeline(workspace: str | Path, seed: int = DEMO_SEED) -> dict[str, Any]
         audit=audit,
         plan=plan,
         queries=queries,
+        certificate=certificate,
     )
     artifacts = write_reports(report, root)
     ledger = Ledger(root / "ledger.sqlite3")
@@ -83,6 +85,10 @@ def run_pipeline(workspace: str | Path, seed: int = DEMO_SEED) -> dict[str, Any]
         "batches": len(plan["batches"]),
         "blockers": len(plan["blockers"]),
         "safe_to_execute": plan["safe_to_execute"],
+        "compatibility_status": certificate["status"],
+        "future_write_permission": certificate["permission"],
+        "future_writes_allowed": certificate["future_writes_allowed"],
+        "compatibility_counterexample_tables": certificate["summary"]["counterexample_tables"],
         "pruned_queries": sum(1 for item in queries if item.decision == "pruned"),
         "query_count": len(queries),
         "artifacts": artifacts,

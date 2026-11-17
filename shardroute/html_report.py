@@ -102,6 +102,24 @@ def render_html(report: dict[str, Any]) -> str:
         f"<pre>{_e(_json(query['trace']))}</pre></details>"
         for query in report["queries"]
     )
+    certificate = report["compatibility_certificate"]
+    cert_rows = "".join(
+        "<tr>"
+        f"<td>{_e(record['table'])}</td><td>{_e(record.get('router_old') or '-')}</td>"
+        f"<td>{_badge(record['status'])}</td><td><code>{_e(record['permission'])}</code></td>"
+        f"<td>{_e(_certificate_evidence(record))}</td></tr>"
+        for record in certificate["tables"]
+    )
+    witness_rows = "".join(
+        f"<tr><td>{_e(record['table'])}</td>"
+        f"<td><code>{_e(_json(witness['raw_key']))}</code></td>"
+        f"<td><code>{_e(witness['normalized_value'])}</code></td>"
+        f"<td><code>{_e(witness['old']['target_shard'])}</code></td>"
+        f"<td><code>{_e(witness['new']['target_shard'])}</code></td>"
+        f"<td>{_e(witness['reason'])}</td></tr>"
+        for record in certificate["tables"]
+        for witness in record.get("counterexamples", [])
+    )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -114,7 +132,8 @@ def render_html(report: dict[str, Any]) -> str:
 <p class="muted">Offline audit, reshard dry-run and query-pruning explanation · run <code>{_e(report['run_id'])}</code></p>
 <p>{_badge(report['status'])} <span class="muted">generated {_e(report['generated_at'])} · seed {_e(report['seed'])}</span></p>
 <nav class="anchors"><a href="#summary">Summary</a><a href="#findings">Findings</a>
-<a href="#plan">Reshard plan</a><a href="#queries">Queries</a><a href="#rollback">Rollback</a></nav>
+<a href="#plan">Reshard plan</a><a href="#compat">Future-key certificate</a>
+<a href="#queries">Queries</a><a href="#rollback">Rollback</a></nav>
 </header>
 <section id="summary"><h2>Executive summary</h2>
 <div class="grid">
@@ -124,6 +143,7 @@ def render_html(report: dict[str, Any]) -> str:
 <div class="stat"><b>{summary['batches']}</b><span>shadow batches</span></div>
 <div class="stat"><b>{summary['blockers']}</b><span>blockers</span></div>
 <div class="stat"><b>{summary['pruned_queries']}/{summary['queries']}</b><span>queries pruned</span></div>
+<div class="stat"><b>{_e('yes' if summary['future_writes_allowed'] else 'no')}</b><span>future writes allowed</span></div>
 </div>
 <h3>Configuration fingerprints</h3>
 {_kv([('Old topology', report['fingerprints']['topology_old']),
@@ -152,6 +172,28 @@ No data was moved by this tool.</p>
 </tbody></table></div>
 <h3>Blockers</h3><ul>{blockers}</ul>
 </section>
+<section id="compat"><h2>Future-key compatibility certificate</h2>
+<div class="notice">Status <strong>{certificate['status']}</strong> · permission
+<strong>{_e(certificate['permission'])}</strong> · future writes allowed:
+<strong>{_e('yes' if certificate['future_writes_allowed'] else 'no')}</strong>.
+Current-row migration safety and unseen-future-key compatibility are independent verdicts;
+a zero-row move matrix does not prove future-key equivalence.</div>
+{_kv([('Certificate id', certificate['certificate_id']),
+      ('Digest', certificate['digest']),
+      ('Proven equivalent tables', certificate['summary']['proven_equivalent']),
+      ('Counterexample tables', certificate['summary']['counterexample']),
+      ('Unknown tables', certificate['summary']['unknown']),
+      ('Proof scope', certificate['proof_scope'])])}
+<div class="wrap"><table><thead><tr><th>Table</th><th>Router</th><th>Status</th>
+<th>Permission</th><th>Evidence</th></tr></thead><tbody>
+{cert_rows or '<tr><td colspan="5" class="empty">No tables compared.</td></tr>'}
+</tbody></table></div>
+<h3>Replayed counterexamples</h3>
+<div class="wrap"><table><thead><tr><th>Table</th><th>Raw key</th><th>Normalized</th>
+<th>Old shard</th><th>New shard</th><th>Reason</th></tr></thead><tbody>
+{witness_rows or '<tr><td colspan="6" class="empty">No raw-key counterexamples found.</td></tr>'}
+</tbody></table></div>
+</section>
 <section id="queries"><h2>Query pruning</h2>
 <div class="wrap"><table><thead><tr><th>Query</th><th>Table</th><th>Decision</th>
 <th>Target shards</th><th>Reason</th></tr></thead><tbody>{''.join(query_rows)}</tbody></table></div>
@@ -170,3 +212,11 @@ def _json(value: Any) -> str:
     import json
 
     return json.dumps(value, sort_keys=True, indent=2, ensure_ascii=False)
+
+
+def _certificate_evidence(record: dict[str, Any]) -> str:
+    if record["status"] == "counterexample":
+        return f"{len(record.get('counterexamples', []))} replayed witness(es)"
+    if record["status"] == "unknown":
+        return "; ".join(record.get("unknown_reasons", [])) or "unproven"
+    return record.get("proof", {}).get("method", "proof")

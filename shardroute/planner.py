@@ -5,11 +5,18 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from typing import Any, Mapping
 
+from .compat import build_compatibility_certificate
 from .errors import ShardRouteError
 from .models import LogicalRow, Topology
 from .router import Router
 
 MAX_BATCH_ROWS = 80
+
+def _compatibility_certificate(
+    old: Topology, new: Topology, budget: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    options = dict(budget or {})
+    return build_compatibility_certificate(old, new, **options)
 
 def _audit_blockers(audit: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     if not audit:
@@ -130,6 +137,8 @@ def build_plan(
     new: Topology,
     logical_rows: Mapping[str, list[LogicalRow]],
     audit: Mapping[str, Any] | None = None,
+    *,
+    certificate_budget: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     old_router, new_router = Router(old), Router(new)
     move_counts: Counter[tuple[str, str, str]] = Counter()
@@ -171,6 +180,31 @@ def build_plan(
             }
         )
     blockers.sort(key=lambda item: (item["table"], item["code"], item["message"]))
+    certificate = _compatibility_certificate(old, new, certificate_budget)
+    # A switch of future writes requires an explicit equivalence proof. Anything
+    # else (real counterexample or unproven/unknown) keeps the old contract for
+    # writes; counterexamples additionally need a fix, not just more shadowing.
+    future_switch_blockers: list[dict[str, Any]] = []
+    if certificate["status"] == "counterexample":
+        future_switch_blockers.append(
+            {
+                "code": "PLAN_FUTURE_WRITE_DRIFT",
+                "severity": "blocking",
+                "table": "",
+                "count": len(certificate["summary"]["counterexample_tables"]),
+                "message": "future keys route to a different shard; the new topology cannot accept writes",
+            }
+        )
+    elif certificate["status"] != "proven_equivalent":
+        future_switch_blockers.append(
+            {
+                "code": "PLAN_FUTURE_WRITE_UNPROVEN",
+                "severity": "blocking",
+                "table": "",
+                "count": len(certificate["summary"]["unknown_tables"]),
+                "message": "future-key equivalence is unproven; restrict to shadow observation, not a write switch",
+            }
+        )
     total_rows = sum(table_totals.values())
     moved_rows = sum(cell["row_count"] for cell in cells)
     blocked_tables = sorted(set(old.tables) - set(new.tables))
@@ -189,12 +223,19 @@ def build_plan(
         "batches": batches,
         "blockers": blockers,
         "rollback_checklist": _rollback_checklist(),
+        # Current-row migration safety: unchanged semantics, still only a dry-run.
         "safe_to_execute": not any(item["severity"] == "blocking" for item in blockers),
+        "compatibility_certificate": certificate,
+        "future_write_permission": certificate["permission"],
+        "future_writes_allowed": certificate["future_writes_allowed"],
+        "future_write_blockers": future_switch_blockers,
         "summary": {
             "tables": dict(sorted(table_totals.items())),
             "moved_by_table": dict(sorted(table_moved.items())),
             "move_cell_count": len(cells),
             "batch_count": len(batches),
             "max_batch_rows": MAX_BATCH_ROWS,
+            "compatibility_status": certificate["status"],
+            "future_writes_allowed": certificate["future_writes_allowed"],
         },
     }

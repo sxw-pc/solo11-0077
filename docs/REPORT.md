@@ -63,11 +63,37 @@ report.html, report.json, report.md
 | `topologies` | 对象 | `old` / `new` 的版本、时间、描述、指纹、分片与表摘要 |
 | `summary` | 对象 | 发现数、移动数、批次、阻塞、查询裁剪数、是否可安全执行 |
 | `audit` | 对象 | 审计状态、汇总、按表统计与发现数组 |
-| `plan` | 对象 | 移动矩阵、批次、阻塞项、回滚清单 |
+| `plan` | 对象 | 移动矩阵、批次、阻塞项、回滚清单、未来键兼容证书 |
+| `compatibility_certificate` | 对象 | 未出现键的未来路由兼容证书（与 `plan` 独立） |
 | `queries` | 数组 | 查询裁剪解释 |
 | `disclaimer` | 字符串 | 静态离线、不连接数据库、不移动数据的声明 |
 
-状态规则：审计存在 critical/high 发现，或计划存在 blocking 阻塞项，则 `fail`；否则审计为 `attention` 时保持 `attention`；全干净为 `pass`。
+状态规则：审计存在 critical/high 发现，或计划存在 blocking 阻塞项，则 `fail`；否则审计为 `attention` 时保持 `attention`；全干净为 `pass`。注意 `status` 只反映当前行迁移与审计；未来写入许可由 `compatibility_certificate.permission` 独立表达。
+
+### compatibility_certificate 对象
+
+```text
+format, certificate_id, digest,
+status: proven_equivalent | counterexample | unknown
+permission: allow_future_writes | block_future_writes | shadow_observation_only
+future_writes_allowed: bool
+old_fingerprint, new_fingerprint
+proof_scope: str
+budget: {hash_residue_budget, witness_probe_budget, max_counterexamples, max_reported_residues}
+summary:
+  tables_checked, proven_equivalent, counterexample, unknown,
+  counterexample_tables[], unknown_tables[], potential_divergence_tables[], new_only_tables[]
+tables[]:
+  table, router_old, router_new, status, permission,
+  normalization_premise: {key_fields_*, case_sensitive_*, normalization_equivalent, null_policy_*, default_shard_*, contract_*}
+  proof: {method, domain, budget, consumed, exhaustive, ...}
+  potential_divergences: {count, ...}
+  counterexamples[]: {raw_key, normalized_value, old, new, comparison_trace, reason, ...}
+  null_policy: {old, new, status, counterexamples[]}
+  unknown_reasons[]  (仅 unknown)
+```
+
+`permission` 与 `plan.safe_to_execute` 是两个独立结论：当前行可以零移动迁移，并不代表未来新键仍路由一致；证书为 `counterexample`/`unknown` 时 `future_writes_allowed=false`，`plan.future_write_blockers` 会单独给出 `PLAN_FUTURE_WRITE_DRIFT`（真实反例）或 `PLAN_FUTURE_WRITE_UNPROVEN`（未证明）。`summary.compatibility_status` / `future_writes_allowed` / `future_write_permission` 同步记录。
 
 ### audit 对象
 
@@ -97,10 +123,15 @@ batches[]:     {batch_id, phase, table, source, target, row_count}
 blockers[]:    {code, severity, table, count, message}
 rollback_checklist[]: {order, action, verification}
 safe_to_execute: bool
-summary: {tables, moved_by_table, move_cell_count, batch_count, max_batch_rows}
+compatibility_certificate: {...}
+future_write_permission: str
+future_writes_allowed: bool
+future_write_blockers[]: {code, severity, table, count, message}
+summary: {tables, moved_by_table, move_cell_count, batch_count, max_batch_rows,
+          compatibility_status, future_writes_allowed}
 ```
 
-`move_cells` 是旧拓扑目标与新拓扑目标不同的行数聚合，按 `(table, from_shard, to_shard)` 排序。批次是 shadow-copy 阶段每 80 行一片，`batch_id` 为 `batch-001` 起的三位序号。blocking 阻塞项使 `safe_to_execute=false`；review 项不会单独阻止计划。
+`move_cells` 是旧拓扑目标与新拓扑目标不同的行数聚合，按 `(table, from_shard, to_shard)` 排序。批次是 shadow-copy 阶段每 80 行一片，`batch_id` 为 `batch-001` 起的三位序号。blocking 阻塞项使 `safe_to_execute=false`；review 项不会单独阻止计划。`future_write_blockers` 只约束未来写入切换，与当前行迁移阻塞项分开记录。
 
 ### queries 数组
 
