@@ -86,10 +86,18 @@ python -m shardroute explain --workspace .shardroute-demo \
 # 对已存在的工作区重新生成报告与台账
 python -m shardroute report --workspace .shardroute-demo
 
+# 为一条已验证的 audit finding 生成最小复现工作区（只读源工作区，写入独立目录）
+python -m shardroute repro --workspace .shardroute-demo --out /tmp/repro-ord \
+  --mode exact_row --table orders --code MISPLACED_ROW --row-id ord_demo_0018
+python -m shardroute repro --workspace .shardroute-demo --out /tmp/repro-hash \
+  --mode semantic_family --table events --code MANIFEST_ROW_COUNT
+
 # 只读复核台
 python -m shardroute serve --workspace .shardroute-demo \
   --host 127.0.0.1 --port 8765
 ```
+
+`repro` 把一条 finding 缩减成可交给修复者复跑的最小工作区：可删无关表、文件和行，但保留目标行的旧拓扑路由证据与触发异常的必要成员；每个候选都用真实 scanner+audit 重跑确认，删行后非目标 manifest 字段会一致重建（目标本身的 manifest 因果字段保持原缺陷值）。`--mode exact_row` 保留指定 row_id 的原始记录与路由证据；`--mode semantic_family` 只保留表与异常代码，在多条同类异常中选出包最小的一条作规则级回归例，并在结果中明确标注。`--budget` 限制缩减与最小性证明的审计重跑次数：预算内完成给出 1-minimal 证据（再删任一剩余单元即失去合同或引入旁生高危），预算耗尽只标 `unproven`。包内 `repro.json` 记录合同、保留对象、全部验证与最小性证据；源工作区保持字节不变。
 
 `route` 还支持 `--key-json`，便于传入 JSON 标量或复合键：
 

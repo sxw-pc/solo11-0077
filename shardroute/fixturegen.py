@@ -9,7 +9,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from .canonical import file_sha256, fingerprint
+from .canonical import file_sha256, fingerprint, sha256_text
 from .config_validation import validate_document
 from .router import Router
 
@@ -241,6 +241,185 @@ def _write_physical(
     for (table, shard), manifest in sorted(manifests.items()):
         _json_write(root / table / shard / "_manifest.json", manifest)
     return {"physical_rows": physical_counts, "manifests": len(manifests)}
+
+# --- Synthetic workspace for minimal-reproduction tests ---------------------
+#
+# A deterministic workspace with many irrelevant rows and exactly four
+# high-severity anomalies: two MISPLACED_ROW of very different row sizes (a
+# long ``ord_0042`` and a short ``ord_0001``), one cross-file DUPLICATE_ROW
+# (``ord_0200``) and one MANIFEST_HASH caused by a stale declared checksum.
+REPRO_SEED = 20260411
+REPRO_LONG_ROW = "ord_0042"
+REPRO_SHORT_ROW = "ord_0001"
+REPRO_DUP_ROW = "ord_0200"
+REPRO_HASH_TABLE = "orders"
+REPRO_HASH_SHARD = "shard_c"
+REPRO_HASH_FILE = "part-000.csv"
+REPRO_FILLER_ROWS = {"orders": 240, "events": 120}
+REPRO_TABLE_COLUMNS = {
+    "orders": ["row_id", "tenant_id", "amount", "note"],
+    "events": ["row_id", "event_day", "kind"],
+}
+
+def repro_topology_document() -> dict[str, Any]:
+    """Two-table topology used by the minimal-reproduction fixture."""
+    return {
+        "version": 1,
+        "generated_at": GENERATED_AT,
+        "description": "Synthetic repro-minimization topology; not connected to any datastore.",
+        "shards": ["shard_a", "shard_b", "shard_c", "shard_d", "shard_e", "shard_f"],
+        "tables": [
+            {
+                "table": "orders",
+                "router": "hash",
+                "key": "tenant_id",
+                "null_policy": "route_default",
+                "default_shard": "shard_a",
+                "buckets": 8,
+                "bucket_map": [
+                    "shard_a", "shard_a", "shard_b", "shard_b",
+                    "shard_c", "shard_c", "shard_d", "shard_d",
+                ],
+                "case_sensitive": True,
+            },
+            {
+                "table": "events",
+                "router": "range",
+                "key": "event_day",
+                "null_policy": "error",
+                "default_shard": None,
+                "ranges": [
+                    {"lower": "2024-01-01", "upper": "2024-07-01", "shard": "shard_e"},
+                    {"lower": "2024-07-01", "upper": None, "shard": "shard_f"},
+                ],
+                "case_sensitive": True,
+            },
+        ],
+    }
+
+def make_repro_rows(seed: int = REPRO_SEED) -> dict[str, list[dict[str, str]]]:
+    rng = random.Random(seed)
+    orders = []
+    for index in range(1, REPRO_FILLER_ROWS["orders"] + 1):
+        orders.append(
+            {
+                "row_id": f"ord_f_{index:04d}",
+                "tenant_id": f"tenant_repro_{rng.randint(1, 48):03d}",
+                "amount": f"{rng.randint(100, 90000) / 100:.2f}",
+                "note": f"irrelevant filler row {index:04d} " + "x" * 32,
+            }
+        )
+    orders.append(
+        {
+            "row_id": REPRO_SHORT_ROW,
+            "tenant_id": "tenant_repro_short",
+            "amount": "1.00",
+            "note": "s",
+        }
+    )
+    orders.append(
+        {
+            "row_id": REPRO_LONG_ROW,
+            "tenant_id": "tenant_repro_long",
+            "amount": "42.00",
+            "note": "L" * 4096,
+        }
+    )
+    orders.append(
+        {
+            "row_id": REPRO_DUP_ROW,
+            "tenant_id": "tenant_repro_dup",
+            "amount": "7.50",
+            "note": "duplicated across two files",
+        }
+    )
+    events = []
+    base_day = date(2024, 1, 1)
+    for index in range(1, REPRO_FILLER_ROWS["events"] + 1):
+        events.append(
+            {
+                "row_id": f"evt_f_{index:04d}",
+                "event_day": (base_day + timedelta(days=rng.randrange(360))).isoformat(),
+                "kind": rng.choice(["view_repro", "checkout_repro"]),
+            }
+        )
+    return {"orders": orders, "events": events}
+
+def _write_repro_physical(root: Path, topology: Any, rows: dict[str, list[dict[str, str]]]) -> None:
+    router = Router(topology)
+    for table in topology.table_names():
+        table_topology = topology.table(table)
+        shards = table_topology.table_shards()
+        routed: dict[str, list[dict[str, str]]] = {shard: [] for shard in shards}
+        extra: dict[str, list[dict[str, str]]] = {shard: [] for shard in shards}
+        for row in rows[table]:
+            shard = router.route_values(table, row).target_shard
+            assert shard is not None
+            if row["row_id"] in (REPRO_LONG_ROW, REPRO_SHORT_ROW):
+                extra[_alternate(shards, shard)].append(row)
+                continue
+            routed[shard].append(row)
+            if row["row_id"] == REPRO_DUP_ROW:
+                extra[_alternate(shards, shard)].append(row)
+        for shard in shards:
+            directory = root / table / shard
+            files = [("part-000.csv", routed[shard])]
+            if extra[shard]:
+                files.append(("part-001.csv", extra[shard]))
+            entries = []
+            for name, file_rows in files:
+                _csv_write(directory / name, file_rows, REPRO_TABLE_COLUMNS[table])
+                entries.append(
+                    {"name": name, "rows": len(file_rows), "sha256": file_sha256(directory / name)}
+                )
+            manifest = {
+                "format_version": 1,
+                "table": table,
+                "shard": shard,
+                "generated_at": GENERATED_AT,
+                "row_count": sum(entry["rows"] for entry in entries),
+                "files": entries,
+            }
+            if table == REPRO_HASH_TABLE and shard == REPRO_HASH_SHARD:
+                # Stale declared checksum: the causal field of the MANIFEST_HASH
+                # demo finding. Row counts stay consistent with the files.
+                manifest["files"][0]["sha256"] = sha256_text(
+                    "stale manifest checksum for part-000.csv"
+                )
+            _json_write(directory / "_manifest.json", manifest)
+
+def build_repro_fixtures(root: str | Path, seed: int = REPRO_SEED) -> dict[str, Any]:
+    """Build the deterministic anomalous workspace used to test minimization."""
+    root = Path(root)
+    for relative in ("config", "logical", "shards"):
+        (root / relative).mkdir(parents=True, exist_ok=True)
+    document = repro_topology_document()
+    _json_write(root / "config" / "topology_old.json", document)
+    rows = make_repro_rows(seed)
+    for table in ("orders", "events"):
+        _csv_write(root / "logical" / f"{table}.csv", rows[table], REPRO_TABLE_COLUMNS[table])
+    topology, issues, _ = validate_document(document)
+    assert topology is not None and not issues
+    _write_repro_physical(root / "shards", topology, rows)
+    tree = [
+        {"path": path.relative_to(root).as_posix(), "sha256": file_sha256(path)}
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    ]
+    return {
+        "seed": seed,
+        "logical_rows": {table: len(rows[table]) for table in sorted(rows)},
+        "anomalies": {
+            "misplaced_rows": [REPRO_LONG_ROW, REPRO_SHORT_ROW],
+            "duplicate_row": REPRO_DUP_ROW,
+            "manifest_hash": {
+                "table": REPRO_HASH_TABLE,
+                "shard": REPRO_HASH_SHARD,
+                "file": REPRO_HASH_FILE,
+            },
+        },
+        "fixture_fingerprint": fingerprint(tree),
+    }
 
 def build_fixtures(root: str | Path, seed: int = DEMO_SEED) -> dict[str, Any]:
     root = Path(root)

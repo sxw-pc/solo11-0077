@@ -217,6 +217,21 @@ def load_physical(
         fingerprint({"files": digest_parts}),
     )
 
+def snapshot_tree(root: str | Path) -> dict[str, str]:
+    """Map every file under ``root`` to its SHA-256, keyed by POSIX relative path.
+
+    Used to prove that a read-only operation (for example building a minimal
+    reproduction workspace) left the source tree byte-identical.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        raise ScanError(SCAN_IO, "directory does not exist", str(root))
+    result: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            result[path.relative_to(root).as_posix()] = file_sha256(path)
+    return result
+
 def scan_workspace(
     logical_dir: str | Path,
     shards_dir: str | Path,

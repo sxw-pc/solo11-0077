@@ -35,6 +35,12 @@ LEDGER_INVALID = "LEDGER_INVALID"
 SERVER_HOST = "SERVER_HOST"
 CLI_USAGE = "CLI_USAGE"
 
+# Minimal-reproduction errors (returned by ``repro`` with exit code 1).
+REPRO_NO_TARGET = "REPRO_NO_TARGET"
+REPRO_AMBIGUOUS = "REPRO_AMBIGUOUS"
+REPRO_UNSUPPORTED = "REPRO_UNSUPPORTED"
+REPRO_OUTPUT = "REPRO_OUTPUT"
+
 @dataclass
 class Issue:
     """A single validation or runtime problem with a stable code."""

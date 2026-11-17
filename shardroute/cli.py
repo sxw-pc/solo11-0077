@@ -15,6 +15,7 @@ from .demo import run_demo, run_pipeline
 from .errors import CLI_USAGE, ConfigValidationError, ShardRouteError
 from .planner import build_plan
 from .query_explain import explain_file
+from .repro import ReproContract, build_minimal_repro
 from .router import Router
 from .scanner import scan_workspace
 
@@ -75,6 +76,14 @@ def _cmd_report(args: argparse.Namespace) -> int:
     _emit(run_pipeline(args.workspace, args.seed))
     return 0
 
+def _cmd_repro(args: argparse.Namespace) -> int:
+    contract = ReproContract(mode=args.mode, table=args.table, code=args.code, row_id=args.row_id)
+    result = build_minimal_repro(
+        args.workspace, args.out, contract, budget=args.budget, config=args.config
+    )
+    _emit(result)
+    return 0
+
 def _cmd_demo(args: argparse.Namespace) -> int:
     _emit(run_demo(args.workspace, args.seed))
     return 0
@@ -121,6 +130,29 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--workspace", required=True)
     report.add_argument("--seed", type=int, default=20260102)
     report.set_defaults(handler=_cmd_report)
+    repro = sub.add_parser(
+        "repro", help="build a minimal reproduction workspace for one audit finding"
+    )
+    repro.add_argument("--workspace", required=True)
+    repro.add_argument(
+        "--out",
+        required=True,
+        help="output directory for the reproduction package (empty, outside the workspace)",
+    )
+    repro.add_argument("--mode", choices=["exact_row", "semantic_family"], required=True)
+    repro.add_argument("--table", required=True)
+    repro.add_argument("--code", required=True, help="finding code, e.g. MISPLACED_ROW or MANIFEST_HASH")
+    repro.add_argument(
+        "--row-id", default="", help="row_id of the target finding (exact_row; omit for manifest findings)"
+    )
+    repro.add_argument(
+        "--budget",
+        type=int,
+        default=250,
+        help="maximum scanner+audit re-runs for minimization and the 1-minimality proof",
+    )
+    repro.add_argument("--config", help="override the workspace old topology")
+    repro.set_defaults(handler=_cmd_repro)
     serve = sub.add_parser("serve", help="start the read-only loopback UI")
     serve.add_argument("--workspace", default=".shardroute-demo")
     serve.add_argument("--host", default="127.0.0.1")

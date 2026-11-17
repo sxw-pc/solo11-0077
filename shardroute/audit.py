@@ -11,6 +11,49 @@ from .manifest_audit import _audit_manifests
 from .router import Router
 
 SEVERITY_ORDER = ("critical", "high", "medium", "low", "info")
+HIGH_SEVERITIES = ("critical", "high")
+
+# Detail fields that carry the causal business evidence of a finding, per
+# code. A minimal reproduction must keep these fields intact; every other
+# detail (line numbers, checksums of rewritten files, placement counts) may
+# legitimately shift as unrelated rows are deleted.
+EVIDENCE_FIELDS: dict[str, tuple[str, ...]] = {
+    "ROUTE_ERROR": ("error_code",),
+    "MISPLACED_ROW": ("expected_shard", "actual_shard"),
+    "DUPLICATE_ROW": ("expected_shard", "shards"),
+    "MISSING_ROW": ("expected_shard",),
+    "MANIFEST_HASH": ("file", "declared"),
+    "MANIFEST_FILE_ROWS": ("file", "declared"),
+    "MANIFEST_ROW_COUNT": ("declared",),
+    "MANIFEST_FILE_MISSING": ("file",),
+    "MANIFEST_DUPLICATE_FILE": ("file",),
+    "MANIFEST_IDENTITY": ("manifest_table", "manifest_shard"),
+}
+
+def finding_signature(finding: dict[str, Any]) -> str:
+    """Stable identity of a finding across workspace reductions.
+
+    Uses the finding's anchoring fields (code, table, shard, row_id and the
+    manifest file it concerns) and ignores volatile detail such as checksums
+    of rewritten files, line numbers or placement counts, so the same finding
+    can be recognized after unrelated rows disappear.
+    """
+    detail = finding.get("detail") or {}
+    parts = (
+        str(finding.get("code", "")),
+        str(finding.get("table", "")),
+        str(finding.get("shard", "")),
+        str(finding.get("row_id", "")),
+        str(detail.get("file", "")),
+    )
+    return "\x1f".join(parts)
+
+def finding_evidence(finding: dict[str, Any]) -> dict[str, Any]:
+    """The causal detail fields a reproduction of this finding must preserve."""
+    detail = finding.get("detail") or {}
+    fields = EVIDENCE_FIELDS.get(str(finding.get("code", "")), ())
+    return {key: detail[key] for key in fields if key in detail}
+
 
 def _placement_rows(scan: ScanResult) -> dict[str, dict[str, list[Any]]]:
     grouped: dict[str, dict[str, list[Any]]] = defaultdict(lambda: defaultdict(list))
