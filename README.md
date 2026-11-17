@@ -98,6 +98,41 @@ python -m shardroute route --config fixtures/config/topology_old.json \
   --table orders --key-json '"tenant_demo_007"'
 ```
 
+### 离线 list_map 布局搜索 `layout-search`
+
+给定真实查询工作负载，在**有限、显式声明**的列表键域内搜索可行的新 `list_map`
+布局，回答“为了这组负载，哪种布局值得多少行搬迁”。完全离线、只读：不改旧拓扑、
+不碰物理文件、不执行迁移、不发起真实查询。
+
+- 候选只改声明键的 `list_map`，保留 `key_fields`、归一化、`null_policy`、
+  `default_shard` 与未声明键；固定键不可移动。
+- 每个候选的查询目标分片由候选拓扑的**真实解释器** `explain_query` 求得；一条
+  `in` 查询按**去重后的目标分片数**计费，绝不按键数重复计费，也不用行频率代替
+  请求频率。只有非分片键条件的查询按全分片访问计入。
+- 每个查询向其每个目标分片各产生一次请求；总请求数为各查询频次乘目标分片数之和，
+  单分片负载为命中它的查询频次之和。
+- 迁移行数用旧、新 `Router` 对全部逻辑行逐行核算；键群整体搬迁，超预算的键群整体
+  计数，不截取部分行凑预算。
+- 同时满足搬迁预算与逐分片读上限的布局才可行；按两个业务授权目标分别选优：
+  `request_economy`（最小化总请求数）与 `hotspot_relief`（最小化最大单分片请求数），
+  再以搬迁行数、稳定布局字典序打破并列。两个目标在同一输入上可能选出不同布局，
+  并分别报告最终请求量与峰值，互不冒用对方的最优值。
+- 精确枚举（带基于真实解释器的正确下界剪枝）。评估预算耗尽且无法证明最优时只给
+  `unknown` 与当前可行候选和界，绝不输出“最优”或 `safe_to_execute`；无可行布局时
+  给出由硬约束导致的不可行证据。
+
+spec JSON 声明键域、固定键、搬迁预算、逐分片读上限与带非负整数频次的工作负载
+（省略 `workload` 时回退到工作区 `queries/*.json`，频次取 1）：
+
+```bash
+python -m shardroute layout-search --workspace .shardroute-demo \
+  --spec layout_spec.json [--write-report] [--max-evaluations 100000]
+```
+
+`--write-report` 额外写出 `reports/layout_search.json` 与 `reports/layout_search.md`，
+内含每个获选/可行布局的 `list_map`、逐查询目标与请求贡献、逐分片负载、迁移行
+身份/数量与预算余量，以及可复核的最优性证据和未选方案。
+
 ---
 
 ## 输出

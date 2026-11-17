@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from . import RUN_FORMAT
-from .canonical import sha256_bytes, stable_id
+from .canonical import canonical_json, sha256_bytes, stable_id
 from .html_report import render_html
 from .models import QueryExplanation, Topology
 
@@ -222,6 +222,158 @@ def write_reports(report: dict[str, Any], workspace: str | Path) -> list[dict[st
         "report.json": (json.dumps(report, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
         "report.md": render_markdown(report).encode("utf-8"),
         "report.html": render_html(report).encode("utf-8"),
+    }
+    artifacts = []
+    for name in sorted(payloads):
+        data = payloads[name]
+        (root / name).write_bytes(data)
+        artifacts.append({"path": f"reports/{name}", "sha256": sha256_bytes(data), "bytes": len(data)})
+    return artifacts
+
+def build_layout_search_report(
+    *,
+    old: Topology,
+    search: dict[str, Any],
+    logical_fingerprint: str = "",
+    physical_fingerprint: str = "",
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Wrap a layout-search result in a deterministic, reviewable report object."""
+    run_id = stable_id(
+        "layoutsearch",
+        "shardroute-layout-search/1",
+        old.fingerprint,
+        logical_fingerprint,
+        physical_fingerprint,
+        seed,
+        canonical_json(search["declared_domain"]),
+        canonical_json(search["constraints"]),
+        canonical_json(search["workload"]),
+    )
+    return {
+        "format": "shardroute-layout-search/1",
+        "run_id": run_id,
+        "generated_at": old.generated_at,
+        "seed": seed,
+        "status": search["status"],
+        "safe_to_execute": search["safe_to_execute"],
+        "fingerprints": {
+            "topology_old": old.fingerprint,
+            "logical": logical_fingerprint,
+            "physical": physical_fingerprint,
+        },
+        "layout_search": search,
+        "disclaimer": search["disclaimer"],
+    }
+
+def render_layout_search_markdown(report: dict[str, Any]) -> str:
+    search = report["layout_search"]
+    lines = [
+        "# ShardRoute list_map layout search",
+        "",
+        f"- run_id: `{report['run_id']}`",
+        f"- table: `{search['table']}`",
+        f"- status: **{search['status']}**",
+        f"- safe_to_execute: **{'yes' if search['safe_to_execute'] else 'no'}**",
+        "",
+        "## Constraints",
+        "",
+        f"- move budget (rows): {search['constraints']['move_budget_rows']}",
+        "- per-shard read caps: " + ", ".join(
+            f"{shard}={cap}" for shard, cap in sorted(search["constraints"]["shard_read_caps"].items())
+        ),
+        "",
+        "## Declared key domain",
+        "",
+        "| Key | Current shard | Candidate shards | Group rows |",
+        "|---|---|---|---:|",
+    ]
+    for item in search["declared_domain"]["movable_keys"]:
+        lines.append(
+            f"| {_cell(item['key'])} | {_cell(item['current_shard'])} | "
+            f"{_cell(', '.join(item['candidate_shards']))} | {item['group_rows']} |"
+        )
+    for item in search["declared_domain"]["fixed_keys"]:
+        lines.append(f"| {_cell(item['key'])} (fixed) | {_cell(item['shard'])} | - | - |")
+    lines.extend(["", "## Objective selections", ""])
+    for objective in search["objectives"]:
+        selection = search["selections"].get(objective)
+        lines.append(f"### {objective}")
+        if selection is None:
+            lines.extend(["", "- No feasible layout.", ""])
+            continue
+        layout = selection["layout"]
+        lines.extend(
+            [
+                "",
+                f"- certification: **{selection['status']}**",
+                f"- evidence: {selection['optimality_evidence']}",
+                f"- lower bound: {selection['lower_bound']}",
+                f"- list_map: `{json.dumps(layout['list_map'], sort_keys=True, ensure_ascii=False)}`",
+                f"- total requests: **{layout['total_requests']}**",
+                f"- peak shard requests: **{layout['peak_shard_requests']}**",
+                f"- rows moved: {layout['moved_rows']} (budget remaining: {layout['budget_remaining']})",
+                f"- moved row ids: {_cell(', '.join(layout['moved_row_ids']) or '-')}",
+                "- per-shard load:",
+            ]
+        )
+        for shard, load in sorted(layout["shard_load"].items()):
+            lines.append(f"  - {shard}: {load} / cap {layout['shard_caps'][shard]}")
+        lines.extend(["", "| Query | Freq | Targets | Requests |", "|---|---:|---|---:|"])
+        for query in layout["queries"]:
+            lines.append(
+                f"| {_cell(query['name'])} | {query['frequency']} | "
+                f"{_cell(', '.join(query['targets']) or 'none')} | {query['requests']} |"
+            )
+        lines.append("")
+    lines.extend(
+        [
+            "## All feasible layouts",
+            "",
+            "| list_map | Total requests | Peak | Moved |",
+            "|---|---:|---:|---:|",
+        ]
+    )
+    for layout in search["feasible_layouts"]:
+        lines.append(
+            f"| {_cell(json.dumps(layout['list_map'], sort_keys=True, ensure_ascii=False))} | "
+            f"{layout['total_requests']} | {layout['peak_shard_requests']} | {layout['moved_rows']} |"
+        )
+    if not search["feasible_layouts"]:
+        lines.append("| - | - | - | - |")
+    if search["rejected_layouts"]:
+        lines.extend(
+            ["", "## Rejected layouts (sample)", "", "| Reason | Moved | list_map |", "|---|---:|---|"]
+        )
+        for layout in search["rejected_layouts"][:20]:
+            lines.append(
+                f"| {_cell(layout['reason'])} | {layout.get('moved_rows', '-')} | "
+                f"{_cell(json.dumps(layout['list_map'], sort_keys=True, ensure_ascii=False))} |"
+            )
+    if search["infeasibility_evidence"]:
+        lines.extend(["", "## Infeasibility evidence", ""])
+        for item in search["infeasibility_evidence"]:
+            lines.append(f"- **{item['constraint']}**: {item['message']}")
+    if search["blockers"]:
+        lines.extend(["", "## Blockers", ""])
+        for blocker in search["blockers"]:
+            lines.append(
+                f"- **{blocker['severity']}** `{blocker['code']}` "
+                f"({_cell(blocker['table'])}): {blocker['message']} [count={blocker['count']}]"
+            )
+    lines.extend(["", "## Boundary notice", "", report["disclaimer"], ""])
+    return "\n".join(lines)
+
+def write_layout_search_report(
+    report: dict[str, Any], workspace: str | Path
+) -> list[dict[str, Any]]:
+    root = Path(workspace) / "reports"
+    root.mkdir(parents=True, exist_ok=True)
+    payloads = {
+        "layout_search.json": (
+            json.dumps(report, sort_keys=True, indent=2, ensure_ascii=False) + "\n"
+        ).encode("utf-8"),
+        "layout_search.md": render_layout_search_markdown(report).encode("utf-8"),
     }
     artifacts = []
     for name in sorted(payloads):

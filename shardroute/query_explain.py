@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .errors import QUERY_INVALID, QueryError, ShardRouteError
 from .models import QueryExplanation, QueryFilter, TableTopology, Topology
@@ -251,3 +251,102 @@ def explain_file(topology: Topology, path: str | Path) -> QueryExplanation:
     except (OSError, ValueError) as exc:
         raise QueryError(QUERY_INVALID, f"cannot read query JSON: {exc}", str(path)) from exc
     return explain_query(topology, query)
+
+def parse_workload_query(topology: Topology, query: Any) -> tuple[str, str, str, list[QueryFilter]]:
+    """Validate one workload query against a topology and return its parsed parts."""
+    return _parse(topology, query)
+
+def explain_workload(topology: Topology, workload: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Explain every workload entry through the real query interpreter.
+
+    Billing rule (single source of truth): one query produces exactly one
+    request against *each* of its target shards, so an ``in`` query is billed
+    once per *distinct* target shard, never once per listed key. Queries with
+    no usable shard-key predicate (or a non-prunable predicate) target every
+    table shard, and that full-shard fan-out is billed as well.
+
+    Each entry carries ``frequency`` (validated non-negative integer by the
+    caller), the real ``QueryExplanation`` decision/reason/trace, the target
+    shard set and this entry's per-shard request contributions. A
+    ``route_error`` flag marks explanations that are not safe to plan around.
+    """
+    results: list[dict[str, Any]] = []
+    for index, entry in enumerate(workload):
+        query = entry["query"]
+        frequency = int(entry["frequency"])
+        explanation = explain_query(topology, query)
+        targets = list(explanation.targeted_shards)
+        route_error = bool(explanation.trace.get("route_errors"))
+        results.append(
+            {
+                "index": index,
+                "name": explanation.name,
+                "table": explanation.table,
+                "frequency": frequency,
+                "decision": explanation.decision,
+                "reason": explanation.reason,
+                "targets": targets,
+                "target_count": len(targets),
+                "requests": frequency * len(targets),
+                "shard_contributions": {shard: frequency for shard in targets},
+                "route_error": route_error,
+                "explanation": explanation,
+                "filters": [item.as_dict() for item in explanation.filters],
+            }
+        )
+    return results
+
+def forced_targets(
+    table: TableTopology,
+    key_filters: list[QueryFilter],
+    partial_map: Mapping[str, str],
+    open_keys: frozenset[str] | set[str] = frozenset(),
+) -> tuple[set[str], bool, bool]:
+    """Lower-bound target set for a list query under a partial key assignment.
+
+    ``partial_map`` holds the list_map entries already fixed for the current
+    search branch (movable keys assigned so far plus every fixed/undeclared
+    key inherited from the old topology). ``open_keys`` are movable keys whose
+    branch choice is still open: their old shard must not be assumed, because
+    assuming it could overstate the bound. Values that cannot contribute a
+    forced target are skipped, so the returned set can only understate the
+    final target set — every bound derived from it is a valid lower bound.
+
+    Returns ``(forced_targets, full_scan, complete)`` where ``complete`` is
+    ``True`` only when every referenced key is already assigned, i.e. the
+    forced set equals the final target set. A partial set is a lower bound
+    but cannot support per-shard feasibility conclusions.
+    """
+    all_shards = set(table.table_shards())
+    candidates = [item for item in key_filters if item.op in {"eq", "in", "is_null"}]
+    if not candidates:
+        return set(all_shards), True, True
+    forced: set[str] = set()
+    complete = True
+    for item in candidates:
+        values = item.value if item.op == "in" else [item.value]
+        for raw in values:
+            normalized = _normalized(table, raw)
+            if normalized is None:
+                if table.null_policy == "drop":
+                    continue
+                if table.null_policy == "route_default" and table.default_shard:
+                    forced.add(table.default_shard)
+                    continue
+                return set(all_shards), True, True
+            if normalized in open_keys:
+                # An open movable key has no fixed target on this branch; its
+                # old list_map shard must never be assumed here.
+                complete = False
+                continue
+            if normalized in partial_map:
+                forced.add(partial_map[normalized])
+            elif normalized in table.list_map:
+                forced.add(table.list_map[normalized])
+            elif table.default_shard:
+                # Undeclared/unmapped values keep the default shard for good.
+                forced.add(table.default_shard)
+            else:
+                # Unroutable in the current partial view: bound with all shards.
+                return set(all_shards), True, True
+    return forced, False, complete

@@ -10,11 +10,15 @@ from typing import Any
 
 from . import __version__
 from .audit import run_audit
-from .config import load_topology, validation_report
+from .config import load_topology, read_json, validation_report
 from .demo import run_demo, run_pipeline
 from .errors import CLI_USAGE, ConfigValidationError, ShardRouteError
-from .planner import build_plan
+from .planner import build_plan, search_layouts
 from .query_explain import explain_file
+from .report import (
+    build_layout_search_report,
+    write_layout_search_report,
+)
 from .router import Router
 from .scanner import scan_workspace
 
@@ -75,6 +79,72 @@ def _cmd_report(args: argparse.Namespace) -> int:
     _emit(run_pipeline(args.workspace, args.seed))
     return 0
 
+def _load_layout_spec(path: str) -> dict[str, Any]:
+    payload = read_json(Path(path))
+    if not isinstance(payload, dict):
+        raise ShardRouteError(CLI_USAGE, "layout search spec must be a JSON object", path)
+    return payload
+
+def _load_workload(spec: dict[str, Any], workspace: str) -> list[dict[str, Any]]:
+    if "workload" in spec:
+        raw_workload = spec["workload"]
+        if not isinstance(raw_workload, list):
+            raise ShardRouteError(CLI_USAGE, "workload must be a list")
+        entries = []
+        for index, item in enumerate(raw_workload):
+            if not isinstance(item, dict) or "query" not in item:
+                raise ShardRouteError(
+                    CLI_USAGE,
+                    "each workload entry must be an object containing a query",
+                    f"workload[{index}]",
+                )
+            frequency = item.get("frequency", 1)
+            if isinstance(frequency, bool) or not isinstance(frequency, int) or frequency < 0:
+                raise ShardRouteError(
+                    CLI_USAGE,
+                    "workload frequency must be a non-negative integer",
+                    f"workload[{index}]",
+                )
+            entries.append({"frequency": frequency, "query": item["query"]})
+        return entries
+    query_dir = Path(spec.get("query_dir", str(Path(workspace) / "queries")))
+    paths = sorted(query_dir.glob("*.json"), key=lambda item: item.name)
+    return [{"frequency": 1, "query": read_json(path)} for path in paths]
+
+def _cmd_layout_search(args: argparse.Namespace) -> int:
+    spec = _load_layout_spec(args.spec)
+    config_path = args.config or _topology_paths(args.workspace)[0]
+    old = load_topology(config_path)
+    root = Path(args.workspace)
+    scan = scan_workspace(root / "logical", root / "shards", old.table_names())
+    audit = run_audit(old, scan)
+    workload = _load_workload(spec, args.workspace)
+    search = search_layouts(
+        old,
+        spec["table"],
+        scan.logical_rows,
+        spec["domains"],
+        fixed_keys=spec.get("fixed_keys", []),
+        move_budget_rows=int(spec["move_budget_rows"]),
+        shard_read_caps=spec["shard_read_caps"],
+        workload=workload,
+        audit=audit,
+        max_evaluations=int(spec.get("max_evaluations", args.max_evaluations)),
+    )
+    if args.write_report:
+        wrapped = build_layout_search_report(
+            old=old,
+            search=search,
+            logical_fingerprint=scan.logical_fingerprint,
+            physical_fingerprint=scan.physical_fingerprint,
+            seed=args.seed,
+        )
+        artifacts = write_layout_search_report(wrapped, args.workspace)
+        _emit({"artifacts": artifacts, "result": search})
+    else:
+        _emit(search)
+    return 0
+
 def _cmd_demo(args: argparse.Namespace) -> int:
     _emit(run_demo(args.workspace, args.seed))
     return 0
@@ -112,6 +182,23 @@ def build_parser() -> argparse.ArgumentParser:
     plan = sub.add_parser("plan", help="print a dry-run resharding plan")
     plan.add_argument("--workspace", required=True)
     plan.set_defaults(handler=_cmd_plan)
+    layout = sub.add_parser(
+        "layout-search",
+        help="search feasible list_map layouts against a query workload (offline, read-only)",
+    )
+    layout.add_argument("--workspace", required=True)
+    layout.add_argument("--spec", required=True, help="layout search spec JSON path")
+    layout.add_argument("--config", help="override the workspace old topology")
+    layout.add_argument("--seed", type=int, default=20260102)
+    layout.add_argument(
+        "--max-evaluations", type=int, default=100000,
+        help="leaf-evaluation budget; exhaustion yields status=unknown",
+    )
+    layout.add_argument(
+        "--write-report", action="store_true",
+        help="also write reports/layout_search.{json,md} into the workspace",
+    )
+    layout.set_defaults(handler=_cmd_layout_search)
     explain = sub.add_parser("explain", help="explain query shard pruning")
     explain.add_argument("--workspace", required=True)
     explain.add_argument("--config", help="override the workspace old topology")
