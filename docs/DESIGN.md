@@ -168,7 +168,12 @@ manifest 校验会识别：缺失 manifest、解析失败、身份不匹配、�
 
 ## 9. 边界与安全
 
-- 默认只监听 `127.0.0.1`。启动时解析 host，仅接受 `localhost` 或 IP loopback；拒绝 `0.0.0.0`、公网地址和任意主机名。
+- 默认只监听 `127.0.0.1`。启动时通过可注入的解析器解析 host 并对每个答复逐个分类，只有经验证的数值回环地址会交给 socket 绑定；被检查过的主机名绝不二次传给 `bind`。字面非回环 IP、`0.0.0.0`、公网地址和任意主机名一律拒绝。
+- 两种可选本机访问合同（`serve --contract`）：
+  - `pinned_endpoint`（默认）：`localhost` 解析结果混杂时，跳过非回环答复、钉住数值回环地址，只宣传数字 URL；混合解析环境仍可启动。
+  - `pure_local_name`：要求 `localhost` 的全部解析答复均为回环，否则拒绝启动；该合同额外允许 `localhost` 名称作为请求 authority（大小写不敏感，不做请求期 DNS）。
+- `bind` 后复核 `getsockname` 与计划地址一致且确属回环；IPv6 监听显式设置 `IPV6_V6ONLY=1` 并记录 dual-stack 行为。所选合同、候选分类、实际地址端口与拒绝原因写入服务端 `bind_audit` 与 `security_events`，错误响应只返回通用 400，不回显 authority、不包含台账内容。
+- 每个 GET/HEAD 在打开台账前经过 authority/peer 闸门：peer 必须是回环；Host 必须恰好一个且语法合法（RFC 9112：缺失或重复 Host 一律拒绝）；Host 端口必须等于实际监听端口（缺省按 80 处理）；absolute-form request-target 的 authority 必须与 Host 一致；IPv6 方括号拼写经 `ipaddress` 归一化后按同一权限集合判断。请求阶段不解析任何 DNS。
 - HTTP 服务只实现 GET/HEAD，所有响应设置 `Cache-Control: no-store`、`nosniff`、`DENY` 和严格 CSP；不加载外部资源、不执行 JavaScript。
 - 路径解析先 URL 解码，拒绝 `..` 与反斜杠；run_id 限定为安全字符集。
 - 不读取任何环境密钥、不包含连接串、不发起外部请求。

@@ -81,7 +81,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
 
 def _cmd_serve(args: argparse.Namespace) -> int:
     from .server import serve
-    serve(args.workspace, args.host, args.port)
+    serve(args.workspace, args.host, args.port, contract=args.contract)
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
@@ -125,6 +125,16 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--workspace", default=".shardroute-demo")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
+    serve.add_argument(
+        "--contract",
+        choices=("pinned_endpoint", "pure_local_name"),
+        default="pinned_endpoint",
+        help=(
+            "pinned_endpoint: pin a numeric loopback address even when 'localhost' "
+            "also resolves non-loopback; pure_local_name: refuse startup unless every "
+            "'localhost' resolver answer is loopback"
+        ),
+    )
     serve.set_defaults(handler=_cmd_serve)
     return parser
 
