@@ -217,6 +217,21 @@ def load_physical(
         fingerprint({"files": digest_parts}),
     )
 
+def hash_workspace_tree(root: str | Path) -> dict[str, str]:
+    """Map every regular file under ``root`` to its SHA-256, keyed by POSIX path.
+
+    Used to prove that a read-only operation (such as reproduction-package
+    building) left a workspace byte-identical.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        raise ScanError(SCAN_IO, "workspace directory does not exist", str(root))
+    return {
+        path.relative_to(root).as_posix(): file_sha256(path)
+        for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix())
+        if path.is_file()
+    }
+
 def scan_workspace(
     logical_dir: str | Path,
     shards_dir: str | Path,

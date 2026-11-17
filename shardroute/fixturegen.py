@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import random
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from .canonical import file_sha256, fingerprint
+from .canonical import file_sha256, fingerprint, sha256_bytes
 from .config_validation import validate_document
 from .router import Router
 

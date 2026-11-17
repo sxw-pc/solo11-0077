@@ -11,6 +11,32 @@ from .manifest_audit import _audit_manifests
 from .router import Router
 
 SEVERITY_ORDER = ("critical", "high", "medium", "low", "info")
+HIGH_SEVERITIES = ("critical", "high")
+
+def finding_identity(finding: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    """Stable identity of one finding dict for cross-workspace comparison.
+
+    Two findings share an identity when they carry the same code, table,
+    shard, row id and manifest file, regardless of line numbers or hashes.
+    Reduction tooling uses this to prove no *new* critical/high finding was
+    manufactured while shrinking a workspace.
+    """
+    detail = finding.get("detail") if isinstance(finding.get("detail"), dict) else {}
+    return (
+        str(finding.get("code", "")),
+        str(finding.get("table", "")),
+        str(finding.get("shard", "")),
+        str(finding.get("row_id", "")),
+        str(detail.get("file", "")),
+    )
+
+def high_findings(audit: dict[str, Any]) -> list[dict[str, Any]]:
+    """The critical/high findings of one audit result, in report order."""
+    return [
+        finding
+        for finding in audit.get("findings", [])
+        if finding.get("severity") in HIGH_SEVERITIES
+    ]
 
 def _placement_rows(scan: ScanResult) -> dict[str, dict[str, list[Any]]]:
     grouped: dict[str, dict[str, list[Any]]] = defaultdict(lambda: defaultdict(list))
